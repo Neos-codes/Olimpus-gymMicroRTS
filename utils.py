@@ -59,7 +59,7 @@ def get_unit_masks(units_mask, observation):
     #print("Milicia:\n", military)
     #print("Workers:\n", workers)
 
-    return military, workers
+    return np.array(military), np.array(workers)
 
 
 def info_unit(observation: np.array):

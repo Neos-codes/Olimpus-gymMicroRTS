@@ -27,6 +27,27 @@ print("Using device:", DEVICE)
 
 
 
+# Para obtener las probabilidades de accion de cada red
+class CategoricalMasked(Categorical):
+    def __init__(self, probs = None, logits = None, validate_args = None, mask = None):
+
+        self.mask = mask
+        
+        self.mask = mask.type(torch.BoolTensor).to(DEVICE)
+        logits = torch.where(self.mask, logits, torch.tensor(-1e+8).to(DEVICE))
+        super(CategoricalMasked, self).__init__(probs, logits, validate_args)
+
+        def entropy(self):
+            if len(self.mask) == 0:
+                return super(CategoricalMasked, self).entropy()
+            p_log_p = self.logits *self.probs
+            p_log_p = torch.where(self.mask, p_log_p, torch.tensor(0.).to(DEVICE))
+            return -p_log_p.sum(-1)
+
+
+
+
+
 class Olimpus(nn.Module):
 
     # Constructor
@@ -69,47 +90,39 @@ class Olimpus(nn.Module):
         return self.atenea(x)
     
     # Toma la vision global de atenea y escoge acciones para la milicia y para las unidades productivas
-    def get_action(self, x, observation, env, action_mask):
+    def get_action(self, input_tensor, observation, env):
         # x: Salida de la red convolucional
 
+        # Obtener salida de atenea
+        logits = self.forward(input_tensor)    # Tensor (256, )
+
         # Obtener salidas (acciones) para ares y efesto
-        ares_logits = self.ares(x).cpu().detach().numpy()
-        hefesto_logits = self.hefesto(x).cpu().detach().numpy()
+        ares_logits = self.ares(logits).reshape((256, -1)) # Tensor (256, 78)
 
-        # Obtener units mask para ares y hefesto
-        reduced_obs = reduce_dim_observation(observation)
-        self.ares_source_unit_mask, self.hefesto_source_unit_mask = get_unit_masks(env.source_unit_mask.ravel(), reduced_obs)
-
-        # Ahora falta hacer masking con la funcion valid_action_mask() en el modulo "parse"
-        start = perf_counter()
-
-        ares_valid_actions = valid_action_mask(ares_logits[0], self.ares_source_unit_mask, action_mask) # Shape (19968, )
-        hefesto_valid_actions = valid_action_mask(hefesto_logits[0],  self.hefesto_source_unit_mask, action_mask)# Shape (19968, )
         
-        # Aqui hay que hacer el sample con softmax
-        nvec_list = env.action_space.nvec.tolist()
-        ares_output = []
-        hefesto_output = []
-        ares_probs = []
-        hefesto_probs = []
-        i = 0
-        for x in nvec_list:
-            action, action_prob = sample(ares_valid_actions[i : i + x])
-            ares_output.append(action)
-            ares_probs.append(action_prob.numpy())
-            action, action_prob = sample(hefesto_valid_actions[i : i + x])
-            hefesto_output.append(action)
-            hefesto_probs.append(action_prob.numpy())
 
-        print("Ares output shape:", len(ares_output))
-        print("Hefesto output shape:", len(hefesto_output))
-        #print(hefesto_output)
+        # Step 0
 
-        end = perf_counter()
-        print("Tiempo en aplicar mascaras:", end - start)
-        hefesto_probs, ares_probs = self.merge_and_probs(hefesto_output, ares_output, hefesto_probs, ares_probs, reduced_obs)
-        # Retornan las acciones y las probabilidades de hefesto y ares
-        return hefesto_output, hefesto_probs, ares_probs
+        hefesto_logits = self.hefesto(logits)       # Tensor (256, 78)
+        
+        # Obtener mascara de acciones
+        action_mask = torch.from_numpy(env.get_action_mask().reshape((1, -1)))
+
+       
+        # Esto da 1972 tensores de tamaños variables siguiendo la forma del nvec.tolist()
+        split_hefesto_logits = torch.split(hefesto_logits, env.action_space.nvec.tolist(), dim= 1) 
+        action_mask = torch.split(action_mask, env.action_space.nvec.tolist(), dim = 1)
+        
+        actions = []
+        probs = []
+        for i in range(len(action_mask)):
+            print(i)
+            logits = torch.where(action_mask[i].type(torch.BoolTensor).to(DEVICE), split_hefesto_logits[i], torch.tensor(-1e+8).to(DEVICE))
+            print(logits)
+
+        #for x in split_hefesto_logits:
+            #print(F.softmax(x, dim = 1))
+
 
 
     # Aqui juntan los outputs de hefesto y ares, ademas se retornan las probabilidades de accion de ambas redes
@@ -179,16 +192,14 @@ olimpus = Olimpus(16 * 16, env).to(DEVICE)
 
 
 obs = env.reset()
-
+print("obs type:", type(obs))
 
 action_mask = env.get_action_mask()
 print("Action mask shape", action_mask.ravel().shape)
 
 input_tensor = torch.from_numpy(obs).float().to(DEVICE)
-# Obtenemos la observacion de atenea
-strategy = olimpus(input_tensor).to(DEVICE)
 # Y con eso, hefesto y ares mueven sus unidades
-action, hefesto_probs, ares_probs = olimpus.get_action(strategy, obs, env, action_mask.ravel())
+action, hefesto_probs, ares_probs = olimpus.get_action(input_tensor, obs, env)
 
 print("Prob obtenida en main:", hefesto_probs, ares_probs)
 print("Action:\n")
