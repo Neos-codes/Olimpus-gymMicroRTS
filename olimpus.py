@@ -27,26 +27,56 @@ print("Using device:", DEVICE)
 
 
 
-# Para obtener las probabilidades de accion de cada red
-class CategoricalMasked(Categorical):
-    def __init__(self, probs = None, logits = None, validate_args = None, mask = None):
 
-        self.mask = mask
-        
-        self.mask = mask.type(torch.BoolTensor).to(DEVICE)
-        logits = torch.where(self.mask, logits, torch.tensor(-1e+8).to(DEVICE))
-        super(CategoricalMasked, self).__init__(probs, logits, validate_args)
+class PPOMemory:
 
-        def entropy(self):
-            if len(self.mask) == 0:
-                return super(CategoricalMasked, self).entropy()
-            p_log_p = self.logits *self.probs
-            p_log_p = torch.where(self.mask, p_log_p, torch.tensor(0.).to(DEVICE))
-            return -p_log_p.sum(-1)
+    # Constructor
+    def __init__(self, batch_size):
+        self.states = []
+        self.probs = []
+        self.values = []
+        self.actions = []
+        self.rewards = []
+        self.dones = []
 
+        self.batch_size = batch_size
+    
+    # Genera los batches para actualizar la red neuronal de accion
+    def generate_batches(self):
+        n_states = len(self.states)
+        batch_start = np.arange(0, n_states, self.batch_size)
+        indices = np.arange(n_states, dtype=np.int64)
+        np.random.shuffle(indices)
+        batches = [indices[i:i+self.batch_size] for i in batch_start]
 
+        return np.array(self.states),\
+                np.array(self.actions),\
+                np.array(self.probs),\
+                np.array(self.values),\
+                np.array(self.rewards),\
+                np.array(self.dones),\
+                batches
 
+    # Permite almacenar en la clase el conjunto de valores para almacenar
+    # en los batches
+    def store_memory(self,state, action, probs, values, reward, done):
+        self.states.append(state)
+        self.probs.append(probs)
+        self.values.append(values)
+        self.reward.append(reward)
+        self.done.append(done)
 
+    # Limpia las listas con los valores guardados para 
+    # actualizar nuevamente
+    def clear_memory(self):
+        self.states = []
+        self.probs = []
+        self.actions = []
+        self.rewards = []
+        self.dones = []
+        self.values = []
+
+# END PPO MEMORY CLASS
 
 class Olimpus(nn.Module):
 
@@ -69,6 +99,13 @@ class Olimpus(nn.Module):
 
         # Aqui crear Red Lineal Hefesto (misma entrada y salida de Ares)
         self.hefesto = layer_init(nn.Linear(256, env.action_space.nvec.sum()), std = 0.01)
+        
+
+        # Optimizadores
+        optim_atenea = torch.optim.Adam(self.atenea.parameters(), lr = 1e-4)
+        optim_ares = torch.optim.Adam(self.ares.parameters(), lr = 1e-4)
+        optim_hefesto = torch.optim.Adam(self.hefesto.parameters(), lr = 1e-4)
+
 
         # Puntero al ambiente
         self.env = env
@@ -80,30 +117,25 @@ class Olimpus(nn.Module):
     # END CONSTRUCTOR
 
     # Obtener output de la red
-    def forward(self, x):
+    def forward(self, x, observation):
         # Rotar tensor de dimensiones (1, h, w, 27) a (1, 27, h, w)
         #print("Permutando vector")
         x = x.permute((0, 3, 1, 2))
         # Ingresar tensor rotado a la red convolucional (se procesa como una imagen)
         # Retorna una impresion global de la observacion
-        #print("Ingresando en atenea")
-        return self.atenea(x)
+        output_atenea = self.atenea(x)
+
+        # Retornar movimientos de Hefesto y Ares combinados
+        return self.get_action(output_atenea, observation, self.env)
     
     # Toma la vision global de atenea y escoge acciones para la milicia y para las unidades productivas
     def get_action(self, input_tensor, observation, env):
         # x: Salida de la red convolucional
 
-        # Obtener salida de atenea
-        logits = self.forward(input_tensor)    # Tensor (256, )
-
-        # Obtener salidas (acciones) para ares y efesto
-
-        
-
         # Step 0
 
-        hefesto_logits = self.hefesto(logits)       # Tensor (78hw, )
-        ares_logits = self.ares(logits)             # Tensor (78hw, )
+        hefesto_logits = self.hefesto(input_tensor)       # Tensor (78hw, )
+        ares_logits = self.ares(input_tensor)             # Tensor (78hw, )
 
         # Obtener mascara de acciones
         action_mask = torch.from_numpy(env.get_action_mask().reshape((1, -1)))
@@ -165,7 +197,7 @@ class Olimpus(nn.Module):
         
         # Imprimir acciones
         #print(len(hefesto_actions))
-        #print(hefesto_actions)
+        print(hefesto_actions)
         
         #print("--------_")
         #print(len(ares_actions))
@@ -173,6 +205,46 @@ class Olimpus(nn.Module):
         return hefesto_actions, hefesto_probs, ares_probs
            
 
+class CriticNetwork(nn.Module):
+    def __init__(self, l_rate, map_size):
+        super(CriticNetwork, self).__init__()
+
+        self.critic = nn.Sequential(
+                nn.Linear(map_size, 256),
+                nn.ReLU(),
+                nn.Linear(256, 128),
+                nn.ReLU(),
+                nn.Linear(128, 1)
+        )
+
+        self.optimizer = optim.Adam(self.parameters(), lr = l_rate)
+
+        self.to(DEVICE)
+
+    def forward(self, state):
+        value = self.critic(state)
+
+        return value
+
+
+
+class Agent:
+
+    def __init__(self, env, n_actions, h_map=16, w_map=16, gamma=0.99, l_rate=0.0003, gae_lambda=0.95, p_clip=0.2, batch_size = 64, n_epochs=20):
+        self.gamma = gamma
+        self.l_rate = l_rate
+        self.gae_lambda = gae_lambda
+        self.p_clip = p_clip
+
+        self.olimpus = Olimpus(h_map*w_map, env)
+        self.critic = CriticNetwork(l_rate, h_map*w_map)
+        self.memory = PPOMemory(batch_size)
+
+
+    def remember(self, state, action, probs, vals, reward, done):
+        self.memory.store_memory(state, action, probs, vals, reward, done)
+
+    #def select_action(self, observation):
 
 # --------- Main --------- #
 print("Creando ambiente...")
@@ -211,7 +283,7 @@ print(end - start)
 # Y con eso, hefesto y ares mueven sus unidades
 print("Obteniendo accion...")
 start = perf_counter()
-action, hefesto_probs, ares_probs = olimpus.get_action(input_tensor, obs, env)
+action, hefesto_probs, ares_probs = olimpus(input_tensor, obs)
 end = perf_counter()
 print(end - start)
 
