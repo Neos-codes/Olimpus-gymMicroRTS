@@ -82,11 +82,11 @@ class Olimpus(nn.Module):
     # Obtener output de la red
     def forward(self, x):
         # Rotar tensor de dimensiones (1, h, w, 27) a (1, 27, h, w)
-        print("Permutando vector")
+        #print("Permutando vector")
         x = x.permute((0, 3, 1, 2))
         # Ingresar tensor rotado a la red convolucional (se procesa como una imagen)
         # Retorna una impresion global de la observacion
-        print("Ingresando en atenea")
+        #print("Ingresando en atenea")
         return self.atenea(x)
     
     # Toma la vision global de atenea y escoge acciones para la milicia y para las unidades productivas
@@ -97,85 +97,86 @@ class Olimpus(nn.Module):
         logits = self.forward(input_tensor)    # Tensor (256, )
 
         # Obtener salidas (acciones) para ares y efesto
-        ares_logits = self.ares(logits).reshape((256, -1)) # Tensor (256, 78)
 
         
 
         # Step 0
 
-        hefesto_logits = self.hefesto(logits)       # Tensor (256, 78)
-        
+        hefesto_logits = self.hefesto(logits)       # Tensor (78hw, )
+        ares_logits = self.ares(logits)             # Tensor (78hw, )
+
         # Obtener mascara de acciones
         action_mask = torch.from_numpy(env.get_action_mask().reshape((1, -1)))
 
-       
+
+        # Step 1      
+
         # Esto da 1972 tensores de tamaños variables siguiendo la forma del nvec.tolist()
-        split_hefesto_logits = torch.split(hefesto_logits, env.action_space.nvec.tolist(), dim= 1) 
-        action_mask = torch.split(action_mask, env.action_space.nvec.tolist(), dim = 1)
+        split_hefesto_logits = torch.split(hefesto_logits, env.action_space.nvec.tolist(), dim= 1)  # Split Hefesto
+        split_ares_logits = torch.split(ares_logits, env.action_space.nvec.tolist(), dim = 1)       # Split Ares
+        action_mask = torch.split(action_mask, env.action_space.nvec.tolist(), dim = 1)             # Split action mask
+
+
         
-        actions = []
-        probs = []
+        hefesto_actions = []
+        hefesto_probs = 0 #hefesto_probs = []
+        ares_actions = []
+        ares_probs = 0    #ares_probs = []
+
+        # Aplicar mascara a cada tensor de [6, 4, 4, 4, 4, 7, 49]
         for i in range(len(action_mask)):
-            print(i)
-            logits = torch.where(action_mask[i].type(torch.BoolTensor).to(DEVICE), split_hefesto_logits[i], torch.tensor(-1e+8).to(DEVICE))
-            print(logits)
-
-        #for x in split_hefesto_logits:
-            #print(F.softmax(x, dim = 1))
-
-
-
-    # Aqui juntan los outputs de hefesto y ares, ademas se retornan las probabilidades de accion de ambas redes
-    def merge_and_probs(self, hefesto_output, ares_output, hefesto_probs, ares_probs, reduced_obs):
-        
-        # Aqui guardaremos las probabilidades de las acciones para cada red
-        ares_prob = 1
-        hefesto_prob = 1
-        
-        # Obtener la source unit mask
-        for i in range(len(self.ares_source_unit_mask)):
-            # Si encontramos un 1 en la mascara de ares, agregarla a la de hefesto
-            if self.ares_source_unit_mask == 1:
-                print("Encontre una milicia en", i)
-                self.hefesto_source_unit_mask[i : i + 7]   # Aqui se mergea ares con hefesto en hefesto
-                # Probabilidad de accion
-                accion = ares_output[7 * i]
-                ares_prob *= ares_probs[7 * i]
-
-                if ares_output[7 * i] != 0:
-                    # Si la unidad de milicia ataca, multiplicar probabilidad de casilla a atacar
-                    if accion == 5:
-                        ares_prob *= [7 * i + 6]
-                    # Si no ataca, solo le queda moverse
-                    else:
-                        ares_prob *= [7 * i + accion]
+            # Aplicar mascara con where a Hefesto
+            logits_hefesto = torch.where(action_mask[i].type(torch.BoolTensor).to(DEVICE), split_hefesto_logits[i], torch.tensor(-1e+8).to(DEVICE))
+            # Aplicar mascara con where a Ares
+            logits_ares = torch.where(action_mask[i].type(torch.BoolTensor).to(DEVICE), split_ares_logits[i], torch.tensor(-1e+8).to(DEVICE))  
             
-            # Ahora recorremos la mascara de hefesto
-            if self.hefesto_source_unit_mask[i] == 1:
-                print("Encontre un productor en", i)
+            # Aplicar softmax sobre los tensores de Hefesto y Ares
+            #soft_hefesto = F.softmax(logits_hefesto, dim = 1)
+            #soft_ares = F.softmax(logits_ares, dim = 1)
+            # Aplicar Categorical para obtener la distribucion
+            m_hefesto = Categorical(logits=logits_hefesto)
+            m_ares = Categorical(logits=logits_ares)
+            # Obtener acciones y probabilidades
+            action_hefesto = m_hefesto.sample()
+            action_ares = m_ares.sample()
+            # Append de las acciones y probabilidades a las listas de accion de cada uno
+            hefesto_actions.append(action_hefesto.cpu().detach().numpy()[0])
+            hefesto_probs += m_hefesto.log_prob(action_hefesto).cpu().detach().numpy()[0]
+            ares_actions.append(action_ares.cpu().detach().numpy()[0])
+            ares_probs += m_ares.log_prob(action_ares).cpu().detach().numpy()[0]
+        #END FOR
 
-                # Calculamos la probabilidad de la accion
-                accion = hefesto_output[7 * i]
-                hefesto_prob *= hefesto_probs[7 * i]
-                
-                # Si la accion es NOOP
-                if hefesto_output[7 * i] != 0:
-                    # Si es atacar, se multiplica por la accion 6
-                    if accion == 5:
-                        hefesto_prob *= hefesto_probs[7 * i + 6]
-                    # Si es producir, por la accion 4 y 5
-                    elif accion == 4:
-                        hefesto_prob *= hefesto_probs[7 * i + accion]
-                        hefesto_prob *= hefesto_probs[7 * i + accion + 1]
-                    # Si es cualquier otra, por su correspondiente
-                    else:
-                        hefesto_prob *= hefesto_probs[7 * i + accion]
+        # Fusionar acciones de hefesto y ares
+        #print("source unit mask shape: ", env.source_unit_mask[0].shape)
+        for i in range(len(env.source_unit_mask[0])):
+            # Si no es una unidad, siguiente posicion
+            if env.source_unit_mask[0][i] != 1:
+                continue
+            
+            # Si es una unidad propia...
+            # Y si es una unidad militar 5: light  6: heavy o 7: ranged
+            if np.argmax(observation.ravel()[27 * i + 13: 27 * i + 21]) > 4:
+                # Copiar las 7 acciones de Ares en las acciones de Hefesto 
+                hefesto_actions[7 * i : 7 * i + 7] = ares_actions[7 * i : 7 * i + 7]
+
+
+
+
         
-        # Se retornan las probabilidades de las acciones de hefesto y ares
-        return hefesto_prob, ares_prob
+        # Imprimir acciones
+        #print(len(hefesto_actions))
+        #print(hefesto_actions)
+        
+        #print("--------_")
+        #print(len(ares_actions))
+
+        return hefesto_actions, hefesto_probs, ares_probs
+           
 
 
-
+# --------- Main --------- #
+print("Creando ambiente...")
+start = perf_counter()
 env = MicroRTSGridModeVecEnv(
         num_selfplay_envs = 0,
         num_bot_envs = 1,
@@ -185,23 +186,36 @@ env = MicroRTSGridModeVecEnv(
         map_paths = ["maps/16x16/basesWorkers16x16.xml"],
         reward_weight = np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0])
         )
+end = perf_counter()
+print(end - start)
 
 
 # Creamos red neuronal del agente
+print("Creando red neuronal Olimpus...")
+start = perf_counter()
 olimpus = Olimpus(16 * 16, env).to(DEVICE)
+end = perf_counter()
+print(end - start)
 
 
 obs = env.reset()
-print("obs type:", type(obs))
+#print("obs type:", type(obs))
 
-action_mask = env.get_action_mask()
-print("Action mask shape", action_mask.ravel().shape)
 
+print("Creando tensor input")
+start = perf_counter()
 input_tensor = torch.from_numpy(obs).float().to(DEVICE)
+end = perf_counter()
+print("Tensor input creado")
+print(end - start)
 # Y con eso, hefesto y ares mueven sus unidades
+print("Obteniendo accion...")
+start = perf_counter()
 action, hefesto_probs, ares_probs = olimpus.get_action(input_tensor, obs, env)
+end = perf_counter()
+print(end - start)
 
-print("Prob obtenida en main:", hefesto_probs, ares_probs)
-print("Action:\n")
-print(action)
+#print("Prob obtenida en main:", hefesto_probs, ares_probs)
+#print("Action:\n")
+#print(action)
 
