@@ -197,7 +197,7 @@ class Olimpus(nn.Module):
         
         # Imprimir acciones
         #print(len(hefesto_actions))
-        print(hefesto_actions)
+        #print(hefesto_actions)
         
         #print("--------_")
         #print(len(ares_actions))
@@ -236,7 +236,7 @@ class Agent:
         self.gae_lambda = gae_lambda
         self.p_clip = p_clip
 
-        self.olimpus = Olimpus(h_map*w_map, env)
+        self.olimpus = Olimpus(h_map*w_map, env).to(DEVICE)
         self.critic = CriticNetwork(l_rate, h_map*w_map)
         self.memory = PPOMemory(batch_size)
 
@@ -244,7 +244,9 @@ class Agent:
     def remember(self, state, action, probs, vals, reward, done):
         self.memory.store_memory(state, action, probs, vals, reward, done)
 
-    #def select_action(self, observation):
+    def select_action(self, observation):
+        input_tensor = torch.from_numpy(observation).float().to(DEVICE)
+        return self.olimpus(input_tensor, obs)
 
 # --------- Main --------- #
 print("Creando ambiente...")
@@ -274,16 +276,16 @@ obs = env.reset()
 #print("obs type:", type(obs))
 
 
-print("Creando tensor input")
+print("Creando Agente...")
 start = perf_counter()
-input_tensor = torch.from_numpy(obs).float().to(DEVICE)
+agent = Agent(env, 10)
 end = perf_counter()
-print("Tensor input creado")
+print("Agente creado")
 print(end - start)
 # Y con eso, hefesto y ares mueven sus unidades
 print("Obteniendo accion...")
 start = perf_counter()
-action, hefesto_probs, ares_probs = olimpus(input_tensor, obs)
+action, hefesto_probs, ares_probs = agent.select_action(obs)
 end = perf_counter()
 print(end - start)
 
