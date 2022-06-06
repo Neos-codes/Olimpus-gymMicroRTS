@@ -248,6 +248,53 @@ class Agent:
         input_tensor = torch.from_numpy(observation).float().to(DEVICE)
         return self.olimpus(input_tensor, obs)
 
+    def learn(self):
+
+        # Aprenderemos por T epochs
+        for _ in range(self.n_epochs):
+            # Obtenremos los batches generados por la memoria
+            state_arr, action_arr, old_prob_arr, vals_arr, reward_arr,\
+            done_arr, batches = self.memory.generate_batches()
+
+            # Cambiamos nomenclatura del arreglo de valores por values
+            values = vals_arr
+            # Creamos un arreglo para los valores de ventaja a calcular
+            advantage = np.zeros(len(reward_arr), dtype=np.float32)
+
+            # Calcularemos T-1 valores de ventaja
+            for t in range(len(reward_arr) - 1):
+                discount = 1
+                a_t = 0
+
+                # Calcular el lambda_t de la formula, que va de t a T-1
+                for k in range(t, len(reward_arr)-1):
+                    a_t += discount * (reward_arr[k] + self.gamma*values[k+1]*(1-int(dones_arr[k])) - values[k])
+                    discount *= self.gamma*self.gae_lambda
+
+                # Se añade el valor de ventaja del estado al arreglo
+                advantage[t] = a_t
+
+            # Se convierte en un tensor
+            advantage = torch.tensor(advantage).to(DEVICE)
+            # Se convierten los valores en tensor
+            values = torch.tensor(values).to(DEVICE)
+
+            # Para cada batch
+            for batch in batches:
+                # Estados, probabilidades viejas y acciones a tensores
+                states = torch.tensor(state_arr[batch], dtype=T.float).to(DEVICE)
+                old_probs = torch.tensor(old_prob_arr[batch]).to(DEVICE)
+                actions = torch.tensor(action_arr[batch]).to(DEVICE)
+
+                # Obtenemos nuevas probabilidades con la nueva politica
+                dist = self.select_action(states)
+                # Tambien los nuevos valores del critico
+                critic_value = self.critic(states)
+                critic_value = torch.squeeze(critic_value)
+
+
+
+
 # --------- Main --------- #
 print("Creando ambiente...")
 start = perf_counter()
