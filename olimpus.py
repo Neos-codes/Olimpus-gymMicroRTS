@@ -33,10 +33,12 @@ class PPOMemory:
     # Constructor
     def __init__(self, batch_size):
         self.states = []
-        self.probs = []
+        self.h_probs = []          # Probs de hefesto
+        self.a_probs = []          # Probs de Ares
         self.values = []
-        self.actions = []
-        self.rewards = []
+        self.actions = []          # Acciones de Olimpus
+        self.h_rewards = []        # Recompensas de Hefesto
+        self.a_rewards = []        # Recompensas de Ares
         self.dones = []
 
         self.batch_size = batch_size
@@ -51,28 +53,35 @@ class PPOMemory:
 
         return np.array(self.states),\
                 np.array(self.actions),\
-                np.array(self.probs),\
+                np.array(self.h_probs),\
+                np.array(self.a_probs),\
                 np.array(self.values),\
-                np.array(self.rewards),\
+                np.array(self.h_rewards),\
+                np.array(self.a_rewards),\
                 np.array(self.dones),\
                 batches
 
     # Permite almacenar en la clase el conjunto de valores para almacenar
     # en los batches
-    def store_memory(self,state, action, probs, values, reward, done):
+    def store_memory(self,state, action, h_prob, a_prob,  values, h_reward, a_reward, done):
         self.states.append(state)
-        self.probs.append(probs)
+        self.actions.append(action)
+        self.h_probs.append(h_prob)
+        self.a_probs.append(a_prob)
         self.values.append(values)
-        self.reward.append(reward)
+        self.h_rewards.append(h_reward)
+        self.a_rewards.append(a_reward)
         self.done.append(done)
 
     # Limpia las listas con los valores guardados para 
     # actualizar nuevamente
     def clear_memory(self):
         self.states = []
-        self.probs = []
+        self.h_probs = []
+        self.a_probs = []
         self.actions = []
-        self.rewards = []
+        self.h_rewards = []
+        self.a_rewards = []
         self.dones = []
         self.values = []
 
@@ -241,8 +250,8 @@ class Agent:
         self.memory = PPOMemory(batch_size)
 
 
-    def remember(self, state, action, probs, vals, reward, done):
-        self.memory.store_memory(state, action, probs, vals, reward, done)
+    def remember(self, state, action, h_probs, a_probs, vals, h_reward, a_reward, done):
+        self.memory.store_memory(state, action,  h_probs, a_probs, vals, h_reward, a_reward, done)
 
     def select_action(self, observation):
         input_tensor = torch.from_numpy(observation).float().to(DEVICE)
@@ -253,7 +262,7 @@ class Agent:
         # Aprenderemos por T epochs
         for _ in range(self.n_epochs):
             # Obtenremos los batches generados por la memoria
-            state_arr, action_arr, old_prob_arr, vals_arr, reward_arr,\
+            state_arr, action_arr, h_old_prob_arr, a_old_prob, vals_arr, h_reward_arr, a_reward_arr,\
             done_arr, batches = self.memory.generate_batches()
 
             # Cambiamos nomenclatura del arreglo de valores por values
@@ -283,14 +292,52 @@ class Agent:
             for batch in batches:
                 # Estados, probabilidades viejas y acciones a tensores
                 states = torch.tensor(state_arr[batch], dtype=T.float).to(DEVICE)
-                old_probs = torch.tensor(old_prob_arr[batch]).to(DEVICE)
-                actions = torch.tensor(action_arr[batch]).to(DEVICE)
+                h_old_probs = torch.tensor(h_old_prob_arr[batch]).to(DEVICE)
+                a_old_probs = torch.tensor(a_old_prob_arr[batch]).to(DEVICE)
 
                 # Obtenemos nuevas probabilidades con la nueva politica
-                dist = self.select_action(states)
+                _, h_new_probs, a_new_probs = torch.Tensor(self.olimpus(states), DEVICE)
                 # Tambien los nuevos valores del critico
                 critic_value = self.critic(states)
                 critic_value = torch.squeeze(critic_value)
+                
+                # Obtenemos el ratio
+                h_prob_ratio = (h_new_probs - h_old_probs).exp()
+                a_prob_ratio = (a_new_probs - a_old_probs).exp()
+
+                # Obtenemos r_t * At sin clippear
+                h_weighted_probs = advantage[batch] * h_prob_ratio
+                a_weighted_probs = advantage[batch] * a_prob_ratio
+
+                # Obtenemos r_t * At clippeado
+                h_weighted_clipped_probs = torch.clamp(h_prob_ratio, 1 - self.p_clip, 1 + self.p_clip) * advantage[batch]
+                a_weighted_clipped_probs = torch.clamp(a_prob_ratio, 1 - self.p_clip, 1 + self.p_clip) * advantage[batch]
+
+                # Obtenemos el loss para hefesto y ares
+                h_loss = -torch.min(h_weighted_probs, h_weighted_clipped_probs).mean()
+                a_loss = -torch.min(a_weighted_probs, a_weighted_clipped_probs).mean()
+
+                # Loss de la red Critico
+                returns = advantage[batch] + values[batch]
+                critic_loss = ((returns - critic_value)**2).mean()
+
+                # Total loss (aqui falta un termino, el de la entropía)
+                h_total_loss = h_loss + 0.5 * critic_loss
+                a_total_loss = a_loss + 0.5 * critic_loss
+                atenea_loss = (h_total_loss + a_total_loss).mean()
+
+                # Actualizar las redes
+                self.olimpus.optim_hefesto.zero_grad()
+                h_total_loss.backward()
+                self.olimpus.optim_hefesto.step()
+                self.olimpus.optim_ares.zero_grad()
+                a_total_loss.backward()
+                self.olimpus.optim_ares.step()
+            
+                # Falta atenea aqui
+
+
+
 
 
 
@@ -336,7 +383,7 @@ action, hefesto_probs, ares_probs = agent.select_action(obs)
 end = perf_counter()
 print(end - start)
 
-#print("Prob obtenida en main:", hefesto_probs, ares_probs)
+print("Prob obtenida en main:", hefesto_probs, ares_probs)
 #print("Action:\n")
 #print(action)
 
