@@ -40,6 +40,7 @@ class PPOMemory:
         self.h_rewards = []        # Recompensas de Hefesto
         self.a_rewards = []        # Recompensas de Ares
         self.dones = []
+        self.obs = []
 
         self.batch_size = batch_size
     
@@ -52,6 +53,7 @@ class PPOMemory:
         batches = [indices[i:i+self.batch_size] for i in batch_start]
 
         return np.array(self.states),\
+                np.array(self.obs),\
                 np.array(self.actions),\
                 np.array(self.h_probs),\
                 np.array(self.a_probs),\
@@ -63,15 +65,16 @@ class PPOMemory:
 
     # Permite almacenar en la clase el conjunto de valores para almacenar
     # en los batches
-    def store_memory(self,state, action, h_prob, a_prob,  values, h_reward, a_reward, done):
+    def store_memory(self,state, obs, action, h_prob, a_prob,  values, h_reward, a_reward, done):
         self.states.append(state)
+        self.obs.append(obs)
         self.actions.append(action)
         self.h_probs.append(h_prob)
         self.a_probs.append(a_prob)
         self.values.append(values)
         self.h_rewards.append(h_reward)
         self.a_rewards.append(a_reward)
-        self.done.append(done)
+        self.dones.append(done)
 
     # Limpia las listas con los valores guardados para 
     # actualizar nuevamente
@@ -84,6 +87,7 @@ class PPOMemory:
         self.a_rewards = []
         self.dones = []
         self.values = []
+        self.obs = []
 
 # END PPO MEMORY CLASS
 
@@ -219,7 +223,7 @@ class CriticNetwork(nn.Module):
         super(CriticNetwork, self).__init__()
 
         self.critic = nn.Sequential(
-                nn.Linear(map_size, 256),
+                nn.Linear(map_size * 27, 256),
                 nn.ReLU(),
                 nn.Linear(256, 128),
                 nn.ReLU(),
@@ -244,40 +248,41 @@ class Agent:
         self.l_rate = l_rate
         self.gae_lambda = gae_lambda
         self.p_clip = p_clip
+        self.n_epochs = n_epochs
 
         self.olimpus = Olimpus(h_map*w_map, env).to(DEVICE)
         self.critic = CriticNetwork(l_rate, h_map*w_map)
         self.memory = PPOMemory(batch_size)
 
 
-    def remember(self, state, action, h_probs, a_probs, vals, h_reward, a_reward, done):
-        self.memory.store_memory(state, action,  h_probs, a_probs, vals, h_reward, a_reward, done)
+    def remember(self, state, obs, action, h_probs, a_probs, vals, h_reward, a_reward, done):
+        self.memory.store_memory(state, obs, action,  h_probs, a_probs, vals, h_reward, a_reward, done)
 
     def select_action(self, observation):
         input_tensor = torch.from_numpy(observation).float().to(DEVICE)
-        return self.olimpus(input_tensor, obs)
+        return *self.olimpus(input_tensor, obs), self.critic(input_tensor.flatten())
 
     def learn(self):
 
         # Aprenderemos por T epochs
         for _ in range(self.n_epochs):
             # Obtenremos los batches generados por la memoria
-            state_arr, action_arr, h_old_prob_arr, a_old_prob, vals_arr, h_reward_arr, a_reward_arr,\
+            state_arr, obs_arr, action_arr, h_old_prob_arr, a_old_prob_arr, vals_arr, h_reward_arr, a_reward_arr,\
             done_arr, batches = self.memory.generate_batches()
 
             # Cambiamos nomenclatura del arreglo de valores por values
             values = vals_arr
             # Creamos un arreglo para los valores de ventaja a calcular
-            advantage = np.zeros(len(reward_arr), dtype=np.float32)
+            advantage = np.zeros(len(h_reward_arr), dtype=np.float32)
 
             # Calcularemos T-1 valores de ventaja
-            for t in range(len(reward_arr) - 1):
+            for t in range(len(h_reward_arr) - 1):
                 discount = 1
                 a_t = 0
 
                 # Calcular el lambda_t de la formula, que va de t a T-1
-                for k in range(t, len(reward_arr)-1):
-                    a_t += discount * (reward_arr[k] + self.gamma*values[k+1]*(1-int(dones_arr[k])) - values[k])
+                for k in range(t, len(h_reward_arr)-1):
+                    a_t += discount * ((h_reward_arr[k] + a_reward_arr[k]).mean() + self.gamma*values[k+1]*(1-int(done_arr[k])) - values[k])
                     discount *= self.gamma*self.gae_lambda
 
                 # Se añade el valor de ventaja del estado al arreglo
@@ -291,12 +296,13 @@ class Agent:
             # Para cada batch
             for batch in batches:
                 # Estados, probabilidades viejas y acciones a tensores
-                states = torch.tensor(state_arr[batch], dtype=T.float).to(DEVICE)
+                states = torch.tensor(state_arr[batch], dtype=torch.float).to(DEVICE)
                 h_old_probs = torch.tensor(h_old_prob_arr[batch]).to(DEVICE)
                 a_old_probs = torch.tensor(a_old_prob_arr[batch]).to(DEVICE)
 
                 # Obtenemos nuevas probabilidades con la nueva politica
-                _, h_new_probs, a_new_probs = torch.Tensor(self.olimpus(states), DEVICE)
+                # TO DO: Arreglar las dimensiones de esta wea, el obs_arr creo que no va
+                _, h_new_probs, a_new_probs = torch.Tensor(self.olimpus(states, obs_arr), DEVICE)
                 # Tambien los nuevos valores del critico
                 critic_value = self.critic(states)
                 critic_value = torch.squeeze(critic_value)
@@ -335,8 +341,11 @@ class Agent:
                 self.olimpus.optim_ares.step()
             
                 # Falta atenea aqui
-
-
+                self.olimpus.optim_atenea_zero_grad()
+                atenea_loss.backward()
+                self.olimpus.optim_atenea.step()
+            
+        self.memory.clear_memory()
 
 
 
@@ -357,6 +366,14 @@ env = MicroRTSGridModeVecEnv(
 end = perf_counter()
 print(end - start)
 
+# Hiperparametros
+n_juegos = 300       # Cantos juegos como máximo se juegan para entrenar
+N = 20               # Cada cuantos pasos se actualiza la red
+
+# Indicadores extra
+h_reward_history = []
+a_reward_history = []
+
 
 # Creamos red neuronal del agente
 print("Creando red neuronal Olimpus...")
@@ -372,10 +389,14 @@ obs = env.reset()
 
 print("Creando Agente...")
 start = perf_counter()
-agent = Agent(env, 10)
+agent = Agent(env, 10000)
 end = perf_counter()
 print("Agente creado")
 print(end - start)
+
+
+
+"""
 # Y con eso, hefesto y ares mueven sus unidades
 print("Obteniendo accion...")
 start = perf_counter()
@@ -386,4 +407,58 @@ print(end - start)
 print("Prob obtenida en main:", hefesto_probs, ares_probs)
 #print("Action:\n")
 #print(action)
+"""
+# Recordatorio de indices de rewards:
+# 0: win, lose, draw   1: Harvest  2: produce worker  3: construct building   4: valid attack action  5: produce militia
+# info[0]["raw_rewards"][5]    # Recompensas por crear una milicia
+
+learn_iters = 0
+n_steps = 0
+
+for i in range(n_juegos):
+    obs = env.reset()
+    done = False
+    h_score = 0
+    a_score = 0
+
+    while not done:
+        # Obtener accion
+        action, h_probs, a_probs, val = agent.select_action(obs)
+        print(type(val))
+        next_obs, reward, done, info = env.step(np.array(action))
+        n_steps += 1
+
+        # Calculamos las reward de cada red
+        h_reward = reward                                                     # La suma de todas las recompensas
+        a_reward = info[0]["raw_rewards"][0] + info[0]["raw_rewards"][4]      # Ganar partida + atacar unidades
+        
+        # Añadir al puntaje total de la partida
+        h_score += h_reward
+        a_score += a_reward
+
+        # Añadir a la memoria los valores
+        agent.remember(obs,obs,  action, h_probs, a_probs, val.cpu().detach().numpy(), h_reward, a_reward, done)
+
+        # Actualizar red cada N pasos
+        if n_steps % N == 0:
+            agent.learn()
+            learn_iters += 1
+        obs = next_obs
+    
+    # Guardar registro del puntaje de la partida
+    h_reward_history.append(h_score)
+    a_reward_history.append(a_score)
+    
+
+    print("Episodio", i, "h_score:", h_score, "a_score:", a_score)
+
+
+
+
+
+
+
+
+
+
 
