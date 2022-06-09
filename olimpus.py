@@ -115,9 +115,9 @@ class Olimpus(nn.Module):
         
 
         # Optimizadores
-        optim_atenea = torch.optim.Adam(self.atenea.parameters(), lr = 1e-4)
-        optim_ares = torch.optim.Adam(self.ares.parameters(), lr = 1e-4)
-        optim_hefesto = torch.optim.Adam(self.hefesto.parameters(), lr = 1e-4)
+        self.optim_atenea = torch.optim.Adam(self.atenea.parameters(), lr = 1e-4)
+        self.optim_ares = torch.optim.Adam(self.ares.parameters(), lr = 1e-4)
+        self.optim_hefesto = torch.optim.Adam(self.hefesto.parameters(), lr = 1e-4)
 
 
         # Puntero al ambiente
@@ -130,7 +130,7 @@ class Olimpus(nn.Module):
     # END CONSTRUCTOR
 
     # Obtener output de la red
-    def forward(self, x, observation):
+    def forward(self, x):
         # Rotar tensor de dimensiones (1, h, w, 27) a (1, 27, h, w)
         #print("Permutando vector")
         x = x.permute((0, 3, 1, 2))
@@ -139,25 +139,32 @@ class Olimpus(nn.Module):
         output_atenea = self.atenea(x)
 
         # Retornar movimientos de Hefesto y Ares combinados
-        return self.get_action(output_atenea, observation, self.env)
+        return self.get_action(output_atenea, x.cpu().detach().numpy(), self.env)
     
     # Toma la vision global de atenea y escoge acciones para la milicia y para las unidades productivas
     def get_action(self, input_tensor, observation, env):
         # x: Salida de la red convolucional
 
         # Step 0
-
+        # TO DO: FIX THIS DIMENSION ISSUE
         hefesto_logits = self.hefesto(input_tensor)       # Tensor (78hw, )
         ares_logits = self.ares(input_tensor)             # Tensor (78hw, )
 
+        print("Hefesto logits:", hefesto_logits[0].shape)
+
+        print("Hefesto logits:", hefesto_logits[1].shape)
+        
+        print("Hefesto logits:", hefesto_logits[2].shape)
         # Obtener mascara de acciones
         action_mask = torch.from_numpy(env.get_action_mask().reshape((1, -1)))
+        print(action_mask.shape)
 
 
         # Step 1      
 
         # Esto da 1972 tensores de tamaños variables siguiendo la forma del nvec.tolist()
         split_hefesto_logits = torch.split(hefesto_logits, env.action_space.nvec.tolist(), dim= 1)  # Split Hefesto
+        print(len(split_hefesto_logits))
         split_ares_logits = torch.split(ares_logits, env.action_space.nvec.tolist(), dim = 1)       # Split Ares
         action_mask = torch.split(action_mask, env.action_space.nvec.tolist(), dim = 1)             # Split action mask
 
@@ -260,7 +267,7 @@ class Agent:
 
     def select_action(self, observation):
         input_tensor = torch.from_numpy(observation).float().to(DEVICE)
-        return *self.olimpus(input_tensor, obs), self.critic(input_tensor.flatten())
+        return *self.olimpus(input_tensor), self.critic(input_tensor.flatten())
 
     def learn(self):
 
@@ -302,11 +309,27 @@ class Agent:
 
                 # Obtenemos nuevas probabilidades con la nueva politica
                 # TO DO: Arreglar las dimensiones de esta wea, el obs_arr creo que no va
-                _, h_new_probs, a_new_probs = torch.Tensor(self.olimpus(states, obs_arr), DEVICE)
-                # Tambien los nuevos valores del critico
-                critic_value = self.critic(states)
+                print("Batch size:", len(batch))
+                h_new_probs = [] 
+                a_new_probs =[] 
+                critic_value = []
+                for x in states:
+                    # Insertamos los estados del batch en el actor y obtenemos las probabilidades
+                    _, h_aux, a_aux = self.olimpus(x)
+                    h_new_probs.append(h_aux)
+                    a_new_probs.append(a_aux)
+
+                    # Insertamos los estados del batch en el critico y obtenemos el valor del estado
+                    critic_value.append(self.critic(x.ravel()))
+        
+                # Pasamos lo del for anterior a tensores
+                h_new_probs = torch.tensor(np.array(h_new_probs), device=DEVICE, requires_grad=True)
+                a_new_probs = torch.tensor(np.array(a_new_probs), device=DEVICE, requires_grad = True) 
+                critic_value = torch.tensor(critic_value, device = DEVICE, requires_grad =True)
                 critic_value = torch.squeeze(critic_value)
-                
+
+
+
                 # Obtenemos el ratio
                 h_prob_ratio = (h_new_probs - h_old_probs).exp()
                 a_prob_ratio = (a_new_probs - a_old_probs).exp()
@@ -333,18 +356,17 @@ class Agent:
                 atenea_loss = (h_total_loss + a_total_loss).mean()
 
                 # Actualizar las redes
-                self.olimpus.optim_hefesto.zero_grad()
-                h_total_loss.backward()
-                self.olimpus.optim_hefesto.step()
-                self.olimpus.optim_ares.zero_grad()
-                a_total_loss.backward()
-                self.olimpus.optim_ares.step()
-            
-                # Falta atenea aqui
-                self.olimpus.optim_atenea_zero_grad()
-                atenea_loss.backward()
+                self.olimpus.optim_atenea.zero_grad()
+                atenea_loss.backward(retain_graph=True)
                 self.olimpus.optim_atenea.step()
             
+
+                self.olimpus.optim_ares.zero_grad()
+                a_total_loss.backward(retain_graph=True)
+                self.olimpus.optim_ares.step()
+                self.olimpus.optim_hefesto.zero_grad()
+                h_total_loss.backward(retain_graph=True)
+                self.olimpus.optim_hefesto.step()
         self.memory.clear_memory()
 
 
@@ -355,7 +377,7 @@ class Agent:
 print("Creando ambiente...")
 start = perf_counter()
 env = MicroRTSGridModeVecEnv(
-        num_selfplay_envs = 0,
+        num_selfplay_envs = 2,
         num_bot_envs = 1,
         max_steps = 2000,
         render_theme = 1,
@@ -424,7 +446,6 @@ for i in range(n_juegos):
     while not done:
         # Obtener accion
         action, h_probs, a_probs, val = agent.select_action(obs)
-        print(type(val))
         next_obs, reward, done, info = env.step(np.array(action))
         n_steps += 1
 
