@@ -20,6 +20,7 @@ from utils import layer_init, get_unit_masks, sample
 from parse import valid_action_mask, reduce_dim_observation
 
 np.set_printoptions(threshold=sys.maxsize)
+torch.set_printoptions(threshold=sys.maxsize)
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print("Using device:", DEVICE)
@@ -94,18 +95,19 @@ class PPOMemory:
 class Olimpus(nn.Module):
 
     # Constructor
-    def __init__(self, map_size, env):
+    def __init__(self, h_size, w_size, env):
         super(Olimpus, self).__init__()
 
         # Crear red convolucional "Atenea"
         self.atenea = nn.Sequential(
-                layer_init(nn.Conv2d(27, 16, kernel_size = 3, stride = 2)),
+                layer_init(nn.Conv2d(in_channels = 27, out_channels = 16, kernel_size = 3)),
                 nn.ReLU(),
-                layer_init(nn.Conv2d(16, 32, kernel_size = 2)),
+                layer_init(nn.Conv2d(in_channels = 16, out_channels = 32, kernel_size = 3)),
                 nn.ReLU(),
-                nn.Flatten(),
-                layer_init(nn.Linear(6*6*32, 256)),
+                nn.Flatten(start_dim=0, end_dim = 2),
+                layer_init(nn.Linear(12*12*32, 256)),
                 nn.ReLU())
+
 
         # Aqui crear Red Lineal Ares  (entrada de 256 neuronas y salida de 19.968 (mapa 16x16)
         self.ares = layer_init(nn.Linear(256, env.action_space.nvec.sum()), std=0.01)
@@ -132,43 +134,41 @@ class Olimpus(nn.Module):
     # Obtener output de la red
     def forward(self, x):
         # Rotar tensor de dimensiones (1, h, w, 27) a (1, 27, h, w)
+        print("Dimension de obs:", x[0].size())
         #print("Permutando vector")
-        x = x.permute((0, 3, 1, 2))
+        x = x[0]
+        x = x.permute((2, 0, 1))    # La dimension de los 27 canales va en la dimension 0
+        print("Dimensiones rotando:", x.size())
         # Ingresar tensor rotado a la red convolucional (se procesa como una imagen)
         # Retorna una impresion global de la observacion
         output_atenea = self.atenea(x)
-
+        print("Output atenea dimensions:", output_atenea.size())
         # Retornar movimientos de Hefesto y Ares combinados
-        return self.get_action(output_atenea, x.cpu().detach().numpy(), self.env)
+        return self.get_action(output_atenea, x[0].cpu().detach().numpy(), self.env)
     
     # Toma la vision global de atenea y escoge acciones para la milicia y para las unidades productivas
     def get_action(self, input_tensor, observation, env):
         # x: Salida de la red convolucional
 
         # Step 0
-        # TO DO: FIX THIS DIMENSION ISSUE
         hefesto_logits = self.hefesto(input_tensor)       # Tensor (78hw, )
         ares_logits = self.ares(input_tensor)             # Tensor (78hw, )
 
-        print("Hefesto logits:", hefesto_logits[0].shape)
-
-        print("Hefesto logits:", hefesto_logits[1].shape)
-        
-        print("Hefesto logits:", hefesto_logits[2].shape)
-        # Obtener mascara de acciones
-        action_mask = torch.from_numpy(env.get_action_mask().reshape((1, -1)))
+       # Obtener mascara de acciones
+        print("Action mask size:", env.get_action_mask().shape)
+        action_mask = torch.from_numpy(env.get_action_mask()[0].ravel())
         print(action_mask.shape)
 
 
         # Step 1      
 
         # Esto da 1972 tensores de tamaños variables siguiendo la forma del nvec.tolist()
-        split_hefesto_logits = torch.split(hefesto_logits, env.action_space.nvec.tolist(), dim= 1)  # Split Hefesto
-        print(len(split_hefesto_logits))
-        split_ares_logits = torch.split(ares_logits, env.action_space.nvec.tolist(), dim = 1)       # Split Ares
-        action_mask = torch.split(action_mask, env.action_space.nvec.tolist(), dim = 1)             # Split action mask
-
-
+        split_hefesto_logits = torch.split(hefesto_logits, env.action_space.nvec.tolist(), dim= 0)  # Split Hefesto
+        #print(split_hefesto_logits)
+        split_ares_logits = torch.split(ares_logits, env.action_space.nvec.tolist(), dim = 0)       # Split Ares
+        action_mask = torch.split(action_mask, env.action_space.nvec.tolist(), dim = 0)             # Split action mask
+        
+        print(len(split_hefesto_logits), len(split_ares_logits), len(action_mask))
         
         hefesto_actions = []
         hefesto_probs = 0 #hefesto_probs = []
@@ -192,12 +192,12 @@ class Olimpus(nn.Module):
             action_hefesto = m_hefesto.sample()
             action_ares = m_ares.sample()
             # Append de las acciones y probabilidades a las listas de accion de cada uno
-            hefesto_actions.append(action_hefesto.cpu().detach().numpy()[0])
-            hefesto_probs += m_hefesto.log_prob(action_hefesto).cpu().detach().numpy()[0]
-            ares_actions.append(action_ares.cpu().detach().numpy()[0])
-            ares_probs += m_ares.log_prob(action_ares).cpu().detach().numpy()[0]
+            hefesto_actions.append(action_hefesto.cpu().detach().numpy())
+            hefesto_probs += m_hefesto.log_prob(action_hefesto).cpu().detach().numpy()
+            ares_actions.append(action_ares.cpu().detach().numpy())
+            ares_probs += m_ares.log_prob(action_ares).cpu().detach().numpy()
         #END FOR
-
+        
         # Fusionar acciones de hefesto y ares
         #print("source unit mask shape: ", env.source_unit_mask[0].shape)
         for i in range(len(env.source_unit_mask[0])):
@@ -209,6 +209,7 @@ class Olimpus(nn.Module):
             # Y si es una unidad militar 5: light  6: heavy o 7: ranged
             if np.argmax(observation.ravel()[27 * i + 13: 27 * i + 21]) > 4:
                 # Copiar las 7 acciones de Ares en las acciones de Hefesto 
+                # TO DO: Aqui esta dando jugo
                 hefesto_actions[7 * i : 7 * i + 7] = ares_actions[7 * i : 7 * i + 7]
 
 
@@ -257,7 +258,7 @@ class Agent:
         self.p_clip = p_clip
         self.n_epochs = n_epochs
 
-        self.olimpus = Olimpus(h_map*w_map, env).to(DEVICE)
+        self.olimpus = Olimpus(h_map, w_map, env).to(DEVICE)
         self.critic = CriticNetwork(l_rate, h_map*w_map)
         self.memory = PPOMemory(batch_size)
 
@@ -308,7 +309,6 @@ class Agent:
                 a_old_probs = torch.tensor(a_old_prob_arr[batch]).to(DEVICE)
 
                 # Obtenemos nuevas probabilidades con la nueva politica
-                # TO DO: Arreglar las dimensiones de esta wea, el obs_arr creo que no va
                 print("Batch size:", len(batch))
                 h_new_probs = [] 
                 a_new_probs =[] 
@@ -400,7 +400,7 @@ a_reward_history = []
 # Creamos red neuronal del agente
 print("Creando red neuronal Olimpus...")
 start = perf_counter()
-olimpus = Olimpus(16 * 16, env).to(DEVICE)
+olimpus = Olimpus(16, 16, env).to(DEVICE)
 end = perf_counter()
 print(end - start)
 
@@ -444,6 +444,7 @@ for i in range(n_juegos):
     a_score = 0
 
     while not done:
+        #env.render()
         # Obtener accion
         action, h_probs, a_probs, val = agent.select_action(obs)
         next_obs, reward, done, info = env.step(np.array(action))
