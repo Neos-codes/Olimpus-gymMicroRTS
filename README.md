@@ -16,9 +16,9 @@ Follow the next steps:
 
 3) Install JDK (in Linux)
 > sudo add-apt-repository ppa:openjdk-r/ppa
-
+>
 > sudo apt install openjdk-8-jdk
-
+>
 > sudo apt install openjdk-8-source
 
 4) Install Poetry
@@ -26,6 +26,7 @@ Follow the next steps:
 
 5) Build gym-microRTS
 > sudo bash build.sh
+>
 > sudo pip install gym-microrts
 
 6) Change to #71 version
