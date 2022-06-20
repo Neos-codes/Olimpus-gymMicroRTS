@@ -101,3 +101,20 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 
+
+
+def print_action_type(action_arr):
+    action = np.argmax(action_arr)
+
+    if action == 0:
+        print("NOOP")
+    elif action == 1:
+        print("move")
+    elif action == 2:
+        print("Harvest")
+    elif action == 3:
+        print("Return")
+    elif action == 4:
+        print("Produce")
+    else:
+        print("Attack")

@@ -16,7 +16,7 @@ from gym_microrts import microrts_ai
 from gym_microrts.envs.vec_env import MicroRTSGridModeVecEnv
 
 # Librerias propias
-from utils import layer_init, get_unit_masks, sample
+from utils import layer_init, get_unit_masks, sample, print_action_type
 from parse import valid_action_mask, reduce_dim_observation
 
 np.set_printoptions(threshold=sys.maxsize)
@@ -97,6 +97,11 @@ class Olimpus(nn.Module):
     # Constructor
     def __init__(self, h_size, w_size, env):
         super(Olimpus, self).__init__()
+        
+        # Guardar dimensiones
+        self.h = h_size
+        self.w = w_size
+
 
         # Crear red convolucional "Atenea"
         self.atenea = nn.Sequential(
@@ -137,18 +142,20 @@ class Olimpus(nn.Module):
         print("Dimension de obs:", x[0].size())
         #print("Permutando vector")
         x = x[0]
+        x = x.view(self.h, self.w, 27).to(DEVICE)
         x = x.permute((2, 0, 1))    # La dimension de los 27 canales va en la dimension 0
         print("Dimensiones rotando:", x.size())
         # Ingresar tensor rotado a la red convolucional (se procesa como una imagen)
         # Retorna una impresion global de la observacion
         output_atenea = self.atenea(x)
-        print("Output atenea dimensions:", output_atenea.size())
+
         # Retornar movimientos de Hefesto y Ares combinados
-        return self.get_action(output_atenea, x[0].cpu().detach().numpy(), self.env)
+        return self.get_action(output_atenea, x.permute((1, 2, 0)).cpu().detach().numpy(), self.env)
     
     # Toma la vision global de atenea y escoge acciones para la milicia y para las unidades productivas
     def get_action(self, input_tensor, observation, env):
         # x: Salida de la red convolucional
+        
 
         # Step 0
         hefesto_logits = self.hefesto(input_tensor)       # Tensor (78hw, )
@@ -192,32 +199,49 @@ class Olimpus(nn.Module):
             action_hefesto = m_hefesto.sample()
             action_ares = m_ares.sample()
             # Append de las acciones y probabilidades a las listas de accion de cada uno
-            hefesto_actions.append(action_hefesto.cpu().detach().numpy())
-            hefesto_probs += m_hefesto.log_prob(action_hefesto).cpu().detach().numpy()
-            ares_actions.append(action_ares.cpu().detach().numpy())
-            ares_probs += m_ares.log_prob(action_ares).cpu().detach().numpy()
+            hefesto_actions.append(action_hefesto.cpu().detach().numpy().tolist())
+            #print("Action hefesto type:", action_hefesto.cpu().detach().numpy().tolist())
+            hefesto_probs += m_hefesto.log_prob(action_hefesto).cpu().detach().numpy().tolist()
+            ares_actions.append(action_ares.cpu().detach().numpy().tolist())
+            ares_probs += m_ares.log_prob(action_ares).cpu().detach().numpy().tolist()
         #END FOR
         
+        #print(hefesto_actions)
         # Fusionar acciones de hefesto y ares
         #print("source unit mask shape: ", env.source_unit_mask[0].shape)
+        print("obs:", observation.shape)
+        ravel_obs = observation.ravel()
+        n_milicias = 0
+        n_productores = 0
         for i in range(len(env.source_unit_mask[0])):
             # Si no es una unidad, siguiente posicion
             if env.source_unit_mask[0][i] != 1:
                 continue
             
+            # Verificar que accion hace la unidad
+            print_action_type(hefesto_actions[:6])
             # Si es una unidad propia...
             # Y si es una unidad militar 5: light  6: heavy o 7: ranged
-            if np.argmax(observation.ravel()[27 * i + 13: 27 * i + 21]) > 4:
+            unit_type = np.argmax(ravel_obs[27 * i + 13 : 27 * i + 21])
+            if unit_type > 4:
                 # Copiar las 7 acciones de Ares en las acciones de Hefesto 
-                # TO DO: Aqui esta dando jugo
+                n_milicias += 1
                 hefesto_actions[7 * i : 7 * i + 7] = ares_actions[7 * i : 7 * i + 7]
 
+            else:
+                print("Productora de tipo", unit_type, "en casilla", i)
+                n_productores += 1 
+
+        
+        print("Tienes", n_milicias, "unidades militares")
+        print("Tienes", n_productores, "unidades productoras")
+        print("input_tensor dims:", observation.shape)
 
 
 
         
         # Imprimir acciones
-        #print(len(hefesto_actions))
+        print(len(hefesto_actions))
         #print(hefesto_actions)
         
         #print("--------_")
@@ -243,7 +267,8 @@ class CriticNetwork(nn.Module):
         self.to(DEVICE)
 
     def forward(self, state):
-        value = self.critic(state)
+        value = self.critic(state.flatten())
+        print("Todo bien en critico!", value)
 
         return value
 
@@ -259,7 +284,7 @@ class Agent:
         self.n_epochs = n_epochs
 
         self.olimpus = Olimpus(h_map, w_map, env).to(DEVICE)
-        self.critic = CriticNetwork(l_rate, h_map*w_map)
+        self.critic = CriticNetwork(l_rate, h_map * w_map)
         self.memory = PPOMemory(batch_size)
 
 
@@ -268,7 +293,8 @@ class Agent:
 
     def select_action(self, observation):
         input_tensor = torch.from_numpy(observation).float().to(DEVICE)
-        return *self.olimpus(input_tensor), self.critic(input_tensor.flatten())
+        print("Input tensor shape:", input_tensor.size())
+        return *self.olimpus(input_tensor), self.critic(input_tensor)
 
     def learn(self):
 
@@ -377,7 +403,7 @@ class Agent:
 print("Creando ambiente...")
 start = perf_counter()
 env = MicroRTSGridModeVecEnv(
-        num_selfplay_envs = 2,
+        num_selfplay_envs = 0,
         num_bot_envs = 1,
         max_steps = 2000,
         render_theme = 1,
@@ -387,6 +413,7 @@ env = MicroRTSGridModeVecEnv(
         )
 end = perf_counter()
 print(end - start)
+
 
 # Hiperparametros
 n_juegos = 300       # Cantos juegos como máximo se juegan para entrenar
@@ -444,9 +471,11 @@ for i in range(n_juegos):
     a_score = 0
 
     while not done:
-        #env.render()
+        env.render()
         # Obtener accion
         action, h_probs, a_probs, val = agent.select_action(obs)
+        action = np.array(action).reshape(256, -1)
+        print("Action shape:", action.shape)
         next_obs, reward, done, info = env.step(np.array(action))
         n_steps += 1
 
