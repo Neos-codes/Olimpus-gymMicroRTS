@@ -8,26 +8,31 @@ By Fabián Cid
 
 Follow the next steps:
 
-Get base repo
+1) Get base repo
 > git clone --recursive https://github.com/vwxyzjn/gym-microrts.git
 
-Open the folder
+2) Open the folder
 > cd gym-microrts
 
-Install JDK (in Linux)
+3) Install JDK (in Linux)
 > sudo add-apt-repository ppa:openjdk-r/ppa
+
 > sudo apt install openjdk-8-jdk
+
 > sudo apt install openjdk-8-source
 
-Install Poetry
+4) Install Poetry
 > sudo pip install poetry
 
-Build gym-microRTS
+5) Build gym-microRTS
 > sudo bash build.sh
 > sudo pip install gym-microrts
 
-Change to #71 version
+6) Change to #71 version
 > git checkout 6d3644b
 
-Execute the example
+7) Execute the example (Optional)
 > python3 hello_word.py
+
+8) Execute the last version of Olympus
+> python3 olympus.py
