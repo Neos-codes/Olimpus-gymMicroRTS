@@ -22,6 +22,7 @@ print("Using device:", DEVICE)
 
 
 # Esto sirve para evitar gradiente desvaneciente
+# Inicializacion de los pesos de una capa, con esta función puedes instanciar una capa
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     # Inicializacion de pesos ortogonal
     torch.nn.init.orthogonal_(layer.weight, std)
@@ -54,7 +55,6 @@ class Olympus:
     def forward(self, input_tensor):
         input_tensor = input_tensor.flatten()           # Aplanar input
         output = self.atenea(input_tensor.to(DEVICE))   # Insertar en red
-        print("Output atenea size:", output.size(), end="\n\n")
         return output
 
 
@@ -87,12 +87,11 @@ for i in range(epochs):
     while not done:
         env.render()
         
+        # Obtener action mask
         action_mask = torch.from_numpy(env.get_action_mask().ravel())
-        print("Action mask shape:", action_mask.shape)
 
         # Obtener accion
         input_tensor = torch.from_numpy(obs).float().squeeze()
-        print("Input tensor size:", input_tensor.size())
         action = olympus.forward(input_tensor)
 
         # Aplicar mascara de acciones posibles   [6, 4, 4, 4, 4, 7, 49]
@@ -102,7 +101,23 @@ for i in range(epochs):
         
         # 2) Aplicar la mascara a cada "sub tensor"
         logits = None
+        entropy = 0
+        action = []
         for i in range(len(split_action_mask)):
             logits = torch.where(split_action_mask[i].type(torch.BoolTensor).to(DEVICE), split_logits[i], torch.tensor(-1e8).to(DEVICE))
-            print(logits)
-        # Aqui quedé, hay que hacer el sample con Categorical Distribution
+
+            # 2.1) Aplicar Softmax al subtensor
+            m = nn.Softmax(dim = 0)
+            logits = m(logits)
+            m = Categorical(logits)
+            # 2.2) Escoger accion
+            sub_action = m.sample()    # Devuelve el indice de la accion escogida
+            log_prob = -m.log_prob(sub_action)
+            entropy += sub_action * log_prob
+            # 2.3) Guardar accion
+            action.append(sub_action.cpu().detach().numpy())
+
+        # 3) Accion total
+        action = np.array(action).reshape((olympus.h * olympus.w, -1))
+
+        next_obs, rewards, done, info = env.step(action)
