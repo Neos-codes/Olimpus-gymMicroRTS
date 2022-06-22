@@ -32,8 +32,11 @@ Follow the next steps:
 6) Change to #71 version
 > git checkout 6d3644b
 
-7) Execute the example (Optional)
+7) Download this repo
+> git clone https://github.com/Neos-codes/Olimpus-gymMicroRTS.git
+
+8) Execute the example in the gym-microRTS repo (Optional)
 > python3 hello_word.py
 
-8) Execute the last version of Olympus
+9) Execute the last version of Olympus (in this repo)
 > python3 olympus.py
