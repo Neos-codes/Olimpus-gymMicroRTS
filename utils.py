@@ -26,95 +26,36 @@ def sample(logits):
 
     return action, action_log
 
+def utype(oh_obs):
 
-def get_unit_masks(units_mask, observation):
-    """
-    Args:
-    units_mask (ravel): Arreglo de 0s y 1s que indica donde hay una unidad en el mapa.
-    observation: Observation reducida (no en one-hot) del mapa, para poder obtener informacion de el
-    """
-    military = []
-    workers = []
+    return np.argmax(oh_obs[13:21]) 
 
-    for i in range(len(units_mask)):
-
-        # Si no hay nada en la posicion, ambas mascaras tienen 0
-        if units_mask[i] == 0:
-            military.append(0)
-            workers.append(0)
-            continue
-
-        # Si la unidad que hay es milicia, 1 en military 0 en workers
-        if observation[i][3] > 4:
-            print("Milicia en pos", i, "de tipo", observation[i][3])
-            military.append(1)
-            workers.append(0)
-            continue
-
-        # Si es otra unidad, 1 en workers y 0 en military
-        print("Productor en pos", i, "de tipo", observation[i][3])
-        military.append(0)
-        workers.append(1)
+def separate_su_mask(su_mask, obs, h, w):      # su_mask shape  (1, hw)
+    """ Recieves the source unit mask and returns 2 source unit mask, 1 for military units and another for product units"""
     
-    #print("Milicia:\n", military)
-    #print("Workers:\n", workers)
+    obs_ = obs[0].reshape((h*w, -1))
 
-    return np.array(military), np.array(workers)
+    milit = np.zeros(h*w)
+    prod = np.zeros(h*w)
+    
+    for i in range(len(su_mask[0])):
+        unit_type = utype(obs_[i])
 
+        if unit_type > 4:   # Si es militar
+            milit[i] = 1
 
-def info_unit(observation: np.array):
-    """ Traduce la observacion en one-hot encoding a formato rapido legible"""
+        elif unit_type > 1: # Si es productora (no recurso)
+            prod[i] = 1
 
-    print("Unit Type:", info_unit_type(np.argmax(observation[13:21])))
-    print("HP:", np.argmax(observation[0:5]), end="")
-    print(" Resources:", np.argmax(observation[5:10]), end="")
-    print(" Owner:", np.argmax(observation[10:13]), end="")
-    print(" Curr Action:", np.argmax(observation[21:]), end="\n\n")
+    
+    #print("prod:\n", prod.reshape((h, w)))
+    #print("milit:\n", milit.reshape((h, w)))
 
-
-def info_unit_type(arg :int):
-    """ Recibe el numero del tipo de una unidad y retorna el string del tipo de la unidad"""
-
-    if arg == 0:
-        return "-"
-    elif arg == 1:
-        return "Resource"
-    elif arg == 2:
-        return "Base"
-    elif arg == 3:
-        return "Barrack"
-    elif arg == 4:
-        return "Worker"
-    elif arg == 5:
-        return "Light"
-    elif arg == 6:
-        return "Heavy"
-    else:
-        return "Range"
-
-""" Funcion que inicializa una capa de red para evitar
-que caiga en gradiente desvaneciente"""
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    # Esto sirve para evitar gradiente desvaneciente
-    torch.nn.init.orthogonal_(layer.weight, std)
-    torch.nn.init.constant_(layer.bias, bias_const)
-    return layer
+    # Retornar 2 mascaras y banderas si hay productoras y/o milicias
+    return prod, milit, np.max(prod) > 0, np.max(milit) > 0
 
 
 
 
-def print_action_type(action_arr):
-    action = np.argmax(action_arr)
 
-    if action == 0:
-        print("NOOP")
-    elif action == 1:
-        print("move")
-    elif action == 2:
-        print("Harvest")
-    elif action == 3:
-        print("Return")
-    elif action == 4:
-        print("Produce")
-    else:
-        print("Attack")
+

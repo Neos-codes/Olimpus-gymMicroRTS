@@ -114,7 +114,6 @@ class God(nn.Module):
     
 class Olympus:
 
-    # Constructor
     def __init__(self, h, w, env):
 
         # Dimensiones del mapa
@@ -145,48 +144,24 @@ class Olympus:
         self.ares_optim = torch.optim.Adam(self.ares.get_parameters(), lr = 1e-4)
         self.heph_optim = torch.optim.Adam(self.heph.get_parameters(), lr = 1e-4)
 
-    # Setear observaciones para Olympus y Atenea (puede que atenea no las necesite)
     def set_obs(self, obs):
         self.obs = obs
         self.atenea.obs = obs
 
 
-    # Obtener mascaras para unidades milicia y productoras (devuelve las 2 mascaras y 2 banderas si hay o no unidades militares o productoras)
     def type_masks(self):
         # Para obtener el source_unit_mask
         self.action_mask = env.get_action_mask()
         # Devuelve 2 mascaras y 2 banderas de unidades
         return separate_su_mask(env.source_unit_mask, self.obs, self.h, self.w)
 
-    # Obtener la accion en base a la ultima observacion en el ambiente
     def get_action(self):
         # Despues de haber seteado las obs con "set_obs"
-        # Ingresar obs en atenea
         at_output = self.atenea(self.obs)
-
-        # Copiar salida de atenea en tensores para ares y hephaestus
-        ares_in = at_output.clone().detach().requires_grad_(True)
-        heph_in = at_output.clone().detach().requires_grad_(True)
-
-        print(ares_in.requires_grad)
-        print(heph_in.requires_grad)
-
-        # Obtener salida de ares y separar en arreglos mas chicos
-        # [6, 4, 4, 4, 4, 7, 49]
-        ares_out = self.ares(ares_in)
-        split_logits = self.split_(ares_out)
-
-        # Lo mismo para Hephaestus
-        heph_out = self.heph(heph_in)
-        split_logits = self.split_(heph_out)
-
+        ares_out = self.ares(at_output)
+        print(ares_out.size())
+        
         return ares_out
-
-    
-    # Recorta el tensor en arreglos de [6, 4, 4, 4, 4, 7, 4] hasta tomar todas las salidas de la red  (Privado)
-    def split_(self, logits):
-        split_logits = torch.split(logits, self.env.action_space.nvec.tolist(), dim = 0)
-        return split_logits
 
 
 
