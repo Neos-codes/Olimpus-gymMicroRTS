@@ -95,12 +95,12 @@ class Agent(nn.Module):
         action = action.T.view(-1, num_predicted_parameters)
         #print("nvec.sum:", self.envs.action_space.nvec.sum())
         action_mask = action_mask.view(-1, self.envs.action_space.nvec.sum())
-        #print("action mask shape:", action_mask.size())
+        print("action mask shape:", action_mask.size())
         #print("action size:", action.size())  # same num_predicted_par 448
 
-        #print("action:\n", action)
-        #print("logprob size:", logprob.size())
-        #print("entropy size:", entropy.size())
+        print("action:\n", action.size())
+        print("logprob size:", logprob.size())
+        print("entropy size:", entropy.size())
         #print("logprob sum:", logprob.sum())
         #print("entroy sum:", entropy.sum())
         #print(logprob)
@@ -154,6 +154,7 @@ nvec = envs.action_space.nvec
 
 for epoch in range(num_epochs):
     obs = next_obs = torch.Tensor(envs.reset()).to(device)      # Obtener observacion inicial
+    print("Obs shape:", obs.size())
     total_epoch_reward_mean = 0.
     print("Epoch", epoch)
     
@@ -171,8 +172,10 @@ for epoch in range(num_epochs):
         action, logprob, entropy, masks = agent.get_action(obs, action_mask)
         #print("Entropy:", entropy, "  logprob:", logprob)
         state_value = agent.get_value(obs).reshape(-1)
+        print("State value shape:", state_value.size())
         
         next_obs, reward, done, info = envs.step(action.cpu())
+        print("Dones shape:", done.shape)
         total_epoch_reward_mean += reward.sum()
         #print("Step reward:", reward.mean())
 
@@ -188,6 +191,7 @@ for epoch in range(num_epochs):
             break
 
         rs = torch.Tensor(reward).to(device)
+        print("Rewards shape:", rs.size())
 
         # TD optimization 
         next_obs = torch.Tensor(next_obs).to(device) 

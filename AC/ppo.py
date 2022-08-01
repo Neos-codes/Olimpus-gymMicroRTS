@@ -44,45 +44,44 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 
 class AC_Batches:
-    def __init__(self, batch_size, n_minibatches):
+    def __init__(self, n_envs, h, w, batch_size, n_minibatches):
         self.batch_size = batch_size
         self.n_minibatches = n_minibatches
+        self.n_envs = n_envs
 
-        self.obs = []
-        self.actions = []
-        self.logprobs = []
-        self.rewards = []
-        self.values = []
-        self.dones = []
-        self.action_masks = []
+        self.obs = torch.zeros((batch_size, n_envs, h, w, 27)).to(device)          # shape: [batch_size, n_envs, h, w, 27]
+        self.actions = torch.zeros((batch_size, n_envs, 7*h*w)).to(device)         # shape: [batch_size, n_evns, 7*h*w]
+        self.logprobs = torch.zeros((batch_size, n_envs, 7*h*w)).to(device)        # shape: [batch_size, n_envs, 7*h*w]
+        self.rewards = torch.zeros((batch_size, n_envs)).to(device)                # shape: [batch_size, n_envs]
+        self.values = torch.zeros((batch_size, n_envs)).to(device)                 # shape: [batch_size, n_envs]
+        self.dones = torch.zeros((batch_size, n_envs)).to(device)                  # shape: [batch_size, n_envs]
+        self.action_masks = np.zeros((batch_size, n_envs*h*w, 78))                 # shape: [batch_size, n_envs, h*w*78]  (en numpy array)
     
-    def clean_batch(self):
-        # Limpiar todas las listas del batch
-        self.obs = []
-        self.actions = []
-        self.logprobs = []
-        self.rewards = []
-        self.values = []
-        self.dones = []
-        self.action_masks = []
-    
-
-   
-   
+      
     # Guardar una observacion y una action mask
-    def save_in_batch(self, obs, action, logprob, reward, value, done, action_masks):
+    def save_in_batch(self, step, obs, action, logprob, reward, value, done, action_masks):
         # Añadir al batch todos los componentes en sus respectivas listas
-        self.obs.append(obs)
-        self.actions.append(action)
-        self.logprobs.append(logprob)
-        self.rewards.append(reward)
-        self.values.append(value)
-        self.dones.append(done)
-        self.action_masks.append(action_masks)
+        self.obs[step] = obs
+        self.actions[step] = action
+        self.logprobs[step] = logprob
+        self.rewards[step] = reward
+        self.values[step] = value
+        self.dones[step] = done
+        self.action_masks[step] = action_masks
+
+        print("In batch:")
+        print("obs shape:", obs.size())
+        print("action shape:", action.size())
+        print("logprob shape:", logprob.size())
+        print("reward shape:", reward.size())
+        print("value shape:", value.size())
+        print("dones shape:", done.size())
+        print("action_mask batch shape:", self.action_masks.shape)
+        print("action mask shape:", action_masks.shape)
 
 
 
-    class CategoricalMasked(Categorical):
+class CategoricalMasked(Categorical):
     def __init__(self, probs=None, logits=None, validate_args=None, masks=[], sw=None):
         self.masks = masks
         #print("Mask recibida en numpy:", masks)
@@ -132,7 +131,7 @@ class Agent(nn.Module):
         #print("logits size:", logits.size())
         split_logits = torch.split(logits, self.envs.action_space.nvec.tolist(), dim=1)   #  (24, 7 * 64)   (7 actions * grid_size)  7 * 64 = 448
         
-        action_mask = torch.Tensor(self.envs.get_action_mask().reshape((24, -1))).to(device)    # shape (24, 64, 78)  sin reshape
+        action_mask = torch.Tensor(self.envs.get_action_mask().reshape((num_bot_envs, -1))).to(device)    # shape (24, 64, 78)  sin reshape
         #print("action mask in get_action:", action_mask)
         #print("action_mask shape:", action_masks.shape)
         #split_action_mask = torch.split(logits, self.envs.action_space.nvec.tolist(), dim=1)
@@ -171,36 +170,22 @@ class Agent(nn.Module):
         return self.critic(self.forward(x))
 
 
-# Obtener el gae
-def compute_gae(next_value, rewards, dones, values, gamma=0.99, lam_bda=0.95):
-    values = values + [next_value]
-    gae = 0
-    returns = []
-
-    for step in reverse(range(len(rewards))):
-        delta = rewards[step] + gamma * values[step + 1] * dones[step] - values[step]
-        gae = delta + gamma * lam_bda * dones[step] * gae
-        returns.instert(0, gae + values[step])
-    
-    return returns
-
-
 
 # Hiperparametros
 num_epochs = 100
 lr = 2.5e-4
 #steps_per_episode = 100000
-num_bot_envs = 24
-num_steps = 256
+num_bot_envs = 12
+num_steps = 1024
 gamma = 0.99
 epsilon = 0.2
 gae = 0.95
 
-batch_size = 1024
-minibatch_size = batch_size // 4
+batch_size = num_steps   # De momento el batch_size y num_steps son lo mismo
+n_minibatches = 4
+minibatch_size = batch_size // n_minibatches     # El batch se divide en "n_minibatches" minibatches
 update_epochs = 4   # Por cada epoch, se actualizara 4 veces, creando 4 nuevos minibatches cada vez
 
-steps_to_update = 100   # Cada cuantos pasos hace el update con el minibatch
 
 # Device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -211,10 +196,10 @@ np.random.seed(1)
 
 envs = MicroRTSGridModeVecEnv(
     num_selfplay_envs=0,
-    num_bot_envs=24,
+    num_bot_envs=num_bot_envs,
     max_steps=2000,
     render_theme=2,
-    ai2s=[microrts_ai.coacAI for _ in range(24)],
+    ai2s=[microrts_ai.coacAI for _ in range(12)],
     map_paths=["maps/8x8/basesWorkers8x8.xml"],
     reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0]),
 )
@@ -226,7 +211,7 @@ if args.capture_video:
 
 
 agent = Agent(envs).to(device)
-batch = AC_Batches(batch_size, minibatch_size)
+batch = AC_Batches(num_bot_envs, 8, 8, batch_size, n_minibatches)    # n_envs, h, w, batch_size, n_minibatches
 optimizer = optim.Adam(agent.parameters(), lr=lr, eps=1e-5)
 rewards_per_episode = []
 time_alive = []
@@ -239,7 +224,7 @@ envs.action_space.seed(0)
 #print("Obs size:", obs.shape)    # (24, 8, 8, 27)
 nvec = envs.action_space.nvec
 #print("nvec:", nvec)   # [6, 4, 4, 4, 4, 7, 49, .....]
-global_step = 0
+
 for epoch in range(num_epochs):
     # Guardamos la observacion en numpy array para uno usar tensores
     next_obs = envs.reset()
@@ -251,11 +236,10 @@ for epoch in range(num_epochs):
     print("Epoch", epoch)
     
     start = perf_counter()
-    for step in range(steps_per_episode):
+    for step in range(num_steps):
         envs.render()
 
-        obs = next_obs
-        global_step += 1
+        obs = torch.Tensor(next_obs).to(device)
 
         # Guardar observaciones
         action_mask = envs.get_action_mask()
@@ -263,24 +247,21 @@ for epoch in range(num_epochs):
         print("action mask reshape:", action_mask.shape)
         action_mask[action_mask == 0] = -9e8
 
-        # Guardar en batch observacion y action mask
-        batch.save_step_data(obs, action_mask)
-
         # Obtenemos acciones y valores sin usar autograd
-        with torch.zero_grad():
-            # Convertir observacion a tensor
-            obs_tensor = torch.Tensor(obs).to(device)
-
+        with torch.no_grad():
             # Get new action
-            action, logprob, entropy, masks = agent.get_action(obs_tensor, action_mask)
+            action, logprob, entropy, masks = agent.get_action(obs, action_mask)
             #print("Entropy:", entropy, "  logprob:", logprob)
             state_value = agent.get_value(obs).reshape(-1)
             
-            next_obs, reward, done, info = envs.step(action.cpu())
-            total_epoch_reward_mean += reward.sum()
 
-            # Aqui debe hacerse el save in batch
-            batch.save_in_batch(obs, action, logprob, entropy, sate_value, done, action_mask)
+        next_obs, reward, done, info = envs.step(action.cpu())
+        dones = torch.Tensor(done).to(device)
+        rs = torch.Tensor(reward).to(device)
+        total_epoch_reward_mean += reward.sum()
+
+        # Aqui debe hacerse el save in batch
+        batch.save_in_batch(step, obs, action, logprob, rs, state_value, dones, action_mask)
 
         
 
@@ -311,7 +292,6 @@ for epoch in range(num_epochs):
     # Actualizar red si se cumple con los pasos
     # Obtener minibatches
     # Aqui si necesitamos el grafico de autograd, por lo que debemos usar todo en tensores!
-    # TO DO: MODIFICAR BATCH PARA QUE LAS LISTAS SEAN TENSORES (con torch.zeros)
     inds = np.arange(batch_size)
 
     for e in range(update_epochs):
@@ -320,7 +300,7 @@ for epoch in range(num_epochs):
         for start in range(0, batch_size, minibatch_size):
             end = start + minibatch_size
             minibatch_ind = inds[start:end]
-             
+        # TO DO: Programar update de ambientes         
             
 
 
