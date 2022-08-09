@@ -7,7 +7,6 @@ import torch.optim as optim
 import torch.functional as F
 from torch.distributions.categorical import Categorical
 
-import argparse
 from matplotlib import pyplot as plt
 
 from gym_microrts import microrts_ai
@@ -19,36 +18,6 @@ import os
 
 torch.set_printoptions(threshold=sys.maxsize)
 np.set_printoptions(threshold=sys.maxsize)
-
-# --- Parsear argumentos
-# Crear parser
-parser = argparse.ArgumentParser(description="AC Version")
-
-# Cargar Neural Network
-parser.add_argument("--load", type=lambda x:bool(strtobool(x)), default=False, nargs="?", const=True, help="Set it True if you want to load a PyTorch Neural Network")
-
-# Cargar Optimizer
-parser.add_argument("--load_opt", type=lambda x:bool(strtobool(x)), default=False, nargs="?", const=True, help="Set it True if you want to load a PyTorch Adam Optimizer")
-
-# Guardar Neural Network
-parser.add_argument("--save", type=lambda x:bool(strtobool(x)), default=False, nargs="?", const=True, help="Set it True if you want to save the Neural Network with the highest rewards")
-
-# Guardar optimizador
-parser.add_argument("--save_opt", type=lambda x:bool(strtobool(x)), default=False, nargs="?", const=True, help="Set it True if you want to save the Optimizer with the Neural Network with the highset rewards")
-
-# Capturar Video
-parser.add_argument("--capture_video", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
-        help="Set this flag \"True\" if you want to capture videos of the epochs")
-
-# Set cantidad de epochs
-parser.add_argument("--epochs", type=int, default=10, help="Num of epochs to train the NN")
-
-# Set cantidad maxima de steps por epoch
-parser.add_argument("--steps", type=int, default=500, help="Num of max steps per epoch")
-
-# Procesar argumentos
-args = parser.parse_args()
-
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
@@ -83,7 +52,7 @@ class Agent(nn.Module):
         super(Agent, self).__init__()
         self.mapsize = mapsize
         self.envs = envs
-        self.network = nn.Sequential(
+        self.network_1 = nn.Sequential(
                 layer_init(nn.Conv2d(27, 16, kernel_size=3, stride=2)),
                 nn.ReLU(),
                 layer_init(nn.Conv2d(16, 32, kernel_size=2)),
@@ -92,13 +61,26 @@ class Agent(nn.Module):
                 layer_init(nn.Linear(128, 256)),
                 nn.ReLU(), )
 
-        self.actor = layer_init(nn.Linear(256, envs.action_space.nvec.sum()), std=0.0)
+        self.network_2 = nn.Sequential(
+                layer_init(nn.Conv2d(27, 16, kernel_size=3, stride=2)),
+                nn.ReLU(),
+                layer_init(nn.Conv2d(16, 32, kernel_size=2)),
+                nn.ReLU(),
+                nn.Flatten(),
+                layer_init(nn.Linear(128, 256)),
+                nn.ReLU(), )
+
+
+        self.actor = layer_init(nn.Linear(512, envs.action_space.nvec.sum()), std=0.0)
         #print("actor output size:", mapsize, envs.action_space.nvec.sum())
         
-        self.critic = layer_init(nn.Linear(256, 1), std=1)
+        self.critic = layer_init(nn.Linear(512, 1), std=1)
 
     def forward(self, x):
-        return self.network(x.permute((0, 3, 1, 2)))
+        input_1 = self.network_1(x.view(x.size()).permute((0, 3, 1, 2)))
+        input_2 = self.network_2(x.view(x.size()).permute((0, 3, 1, 2)))
+
+        return torch.cat((input_1, input_2), dim=1)
 
     def get_action(self, x, action=None, action_masks=None, envs=None):
         logits = self.actor(self.forward(x))
@@ -144,9 +126,9 @@ class Agent(nn.Module):
         return self.critic(self.forward(x))
 
 # Hiperparametros
-num_epochs = args.epochs
+num_epochs = 40
 lr = 2.5e-4
-steps_per_episode = args.steps
+steps_per_episode = 100000
 num_bot_envs = 24
 num_steps = 256
 gamma = 0.99
@@ -169,45 +151,10 @@ envs = MicroRTSGridModeVecEnv(
 )
 # envs = VecVideoRecorder(envs, 'videos', record_video_trigger=lambda x: x % 4000 == 0, video_length=2000)
 
-# Inicializar Red y optimizador como None para evitar bugs de declaracion de variable
-agent = None
-optimizer = None
-
-# Cargar red neuronal
-if args.load:
-    route = input("Indique la ruta para cargar la red neuronal:")
-    agent = torch.load(route)
-
-else:
-    agent = Agent(envs).to(device)
-
-
-# Cargar optimizador
-if args.load_opt:
-    route = input("Indique la ruta para cargar el optimizador:")
-    optimizer = torch.load(route)
-
-else:
-    optimizer = optim.Adam(agent.parameters(), lr=lr, eps=1e-5)
-
-# Ruta para guardar al red
-route = ""
-route_opt = ""
-if args.save:
-    route = "ac_parameters.pth"
-
-# Ruta para guardar el optimizador
-if args.save_opt:
-    route_opt = "ac_optim.pth" 
-
-
+agent = Agent(envs).to(device)
+optimizer = optim.Adam(agent.parameters(), lr=lr, eps=1e-5)
 rewards_per_episode = []
 time_alive = []
-global_steps = 0
-graph_steps = []
-
-max_reward = -100
-
 
 envs.action_space.seed(0)
 #obs = torch.Tensor(envs.reset()).to(device)
@@ -218,16 +165,14 @@ envs.action_space.seed(0)
 nvec = envs.action_space.nvec
 #print("nvec:", nvec)   # [6, 4, 4, 4, 4, 7, 49, .....]
 
-
 for epoch in range(num_epochs):
     obs = next_obs = torch.Tensor(envs.reset()).to(device)      # Obtener observacion inicial
-    #print("Obs shape:", obs.size())
+    print("Obs shape:", obs.size())
     total_epoch_reward_mean = 0.
     print("Epoch", epoch)
     
     start = perf_counter()
     for step in range(steps_per_episode):
-        global_steps += 1
         envs.render()
         action_mask = envs.get_action_mask()
         #print("action mask shape:", action_mask.shape)
@@ -247,29 +192,16 @@ for epoch in range(num_epochs):
         total_epoch_reward_mean += reward.sum()
         #print("Step reward:", reward.mean())
 
-        # Si algun ambiente termina la partida o es el ultimo step de la epoch,
-        # revisamos las recompensas y vemos si guardar red
-        if done.max() == 1 or step == steps_per_episode - 1:
+        #print(done.astype(int))
+        if done.max() == 1:
             #print("Un ambiente termino!")
             #print("Total reward:", total_epoch_reward_mean / num_bot_envs)
-            #print("step:" ,step)
-            rewards_per_episode.append(total_epoch_reward_mean / num_bot_envs)  # Guadamos la recompensa promedio actual
-            graph_steps.append(global_steps)                                    # Guardamos los pasos que llevamos hasta el momento
-
-            # Si decidimos guardar la red neuronal...
-            if total_epoch_reward_mean / num_bot_envs > max_reward:
-                if args.save:
-                    #print("Saving NN")
-                    torch.save(agent, route)
-                if args.save_opt:
-                    torch.save(optimizer, route_opt)
-
+            rewards_per_episode.append(total_epoch_reward_mean / num_bot_envs)
             stop = perf_counter()
-            time_alive.append(stop-start)                                       # Guardamos el tiempo de la partida
+            time_alive.append(stop-start)
             print("Reward:", total_epoch_reward_mean / num_bot_envs)
             print("Time:", stop - start)
-            print("-------\n\n")
-            #break
+            break
 
         rs = torch.Tensor(reward).to(device)
         #print("Rewards shape:", rs.size())
@@ -302,8 +234,9 @@ axs = gs.subplots(sharex = True, sharey = False)
 #fig.suptitle("Recompensa y tiempo")
 axs[0].plot(rewards_per_episode)
 axs[0].set_title("Recompensas promedio por episodio")
-axs[1].plot(graph_steps)
-axs[1].set_title("Duración en steps partida promedio")
+axs[1].plot(time_alive)
+axs[1].set_title("Duración partida promedio")
 #plt.plot(rewards_per_episode)
 plt.show()
+input()
 envs.close()

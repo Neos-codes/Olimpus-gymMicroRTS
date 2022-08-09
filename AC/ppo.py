@@ -129,16 +129,23 @@ class Agent(nn.Module):
     def get_action(self, x, action=None, action_masks=None, envs=None):
         logits = self.actor(self.forward(x))
         #print("logits size:", logits.size())
-        split_logits = torch.split(logits, self.envs.action_space.nvec.tolist(), dim=1)   #  (24, 7 * 64)   (7 actions * grid_size)  7 * 64 = 448
+        split_logits = torch.split(logits, self.envs.action_space.nvec.tolist(), dim=1)   #  (24, 7 * hw)   (7 actions * grid_size)  7 * 64 = 448
         
-        action_mask = torch.Tensor(self.envs.get_action_mask().reshape((num_bot_envs, -1))).to(device)    # shape (24, 64, 78)  sin reshape
-        #print("action mask in get_action:", action_mask)
-        #print("action_mask shape:", action_masks.shape)
-        #split_action_mask = torch.split(logits, self.envs.action_space.nvec.tolist(), dim=1)
+        # Si no se da la accion, es porque 
+        if action == None:
+            action_mask = torch.Tensor(self.envs.get_action_mask().reshape((num_bot_envs, -1))).to(device)    # shape (24, hw, 78)  sin reshape
+            #print("action mask in get_action:", action_mask)
+            #print("action_mask shape:", action_masks.shape)
+            #split_action_mask = torch.split(logits, self.envs.action_space.nvec.tolist(), dim=1)
 
-        split_action_mask = torch.split(action_mask, self.envs.action_space.nvec.tolist(), dim=1)
-        multi_categoricals = [CategoricalMasked(logits=logits, masks=ams) for (logits, ams) in zip(split_logits, split_action_mask)]
-        action = torch.stack([categorical.sample() for categorical in multi_categoricals])
+            split_action_mask = torch.split(action_mask, self.envs.action_space.nvec.tolist(), dim=1)
+            multi_categoricals = [CategoricalMasked(logits=logits, masks=ams) for (logits, ams) in zip(split_logits, split_action_mask)]
+            action = torch.stack([categorical.sample() for categorical in multi_categoricals])
+
+        else:
+            split_action_mask = torch.split(action_masks, envs.action_space.nvec.tolist(), dim=1)
+            multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(split_logits, split_action_mask)]
+
 
         # Retornar logpobs, entropia, accion y action_mask
         logprob = torch.stack([categorical.log_prob(a) for a, categorical in zip(action, multi_categoricals)])
@@ -228,6 +235,7 @@ nvec = envs.action_space.nvec
 for epoch in range(num_epochs):
     # Guardamos la observacion en numpy array para uno usar tensores
     next_obs = envs.reset()
+    next_dones = torch.zeros(num_envs).to(device)
 
 
     # Para usar la observacion en la red neuronal, la usamos como tensor
@@ -261,7 +269,7 @@ for epoch in range(num_epochs):
         total_epoch_reward_mean += reward.sum()
 
         # Aqui debe hacerse el save in batch
-        batch.save_in_batch(step, obs, action, logprob, rs, state_value, dones, action_mask)
+        batch.save_in_batch(step, obs, action, logprob, rs, state_value, next_dones, action_mask)
 
         
 
@@ -270,22 +278,30 @@ for epoch in range(num_epochs):
     # No necesitamos tener el grafico de autograd
     with torch.no_grad():
         last_value = agent.get_value(torch.Tensor(next_obs).to(device)).reshape(-1)   # Tensor del ultimo estado al terminar la epoch
+        advantages = torch.zeros_like(batch.rewards).to(device)
         print("Last value shape:", last_value.size())
         # Obtener los retornos
-        batch.values = batch.values + [last_value]   # Añadir el ultimo valor al batch
-        gae = 0
-        returns = []
+        #batch.values = batch.values + [last_value]   # Añadir el ultimo valor al batch
+        last_gae = 0
+        #returns = []
 
         for ret_step in reversed(range(len(batch.rewards))):
-            delta = batch.rewards[ret_step] + gamma*batch.values[ret_step + 1] * batch.dones[ret_step] - batch.values[ret_step]
-            print("Rewards type:", type(batch.rewards[ret_step]))
+            if ret_step == num_steps - 1:
+                nextnonterminal = 1.0 - dones
+                delta = batch.rewards[ret_step] + gamma * gae * last_value * nextnonterminal - batch.values[ret_step]
+            else:
+                nextnonterminal = 1.0 - batch.dones[ret_step]
+                delta = batch.rewards[ret_step] + gamma * gae * batch.values[ret_step + 1] * nextnonterminal - batch.values[ret_step]
+            """print("Rewards type:", type(batch.rewards[ret_step]))
             print("Values type:", type(values[ret_step]))
             print("Dones type:", type(batch.dones[ret_step]))
-            print("Delta shape:", delta.shape)
+            print("Delta shape:", delta.shape)"""
 
-            gae = delta + gamma*batch.dones*gae
-            returns.insert(0, gae + batch.values[ret_step])   # Con el insert vamos agregando al inicio
-                                                              # asi no es necesario hacer reverse al return
+            # Obtenemos el valor de ventaja
+            advantages[ret_step] = last_gae = delta + gamma * gae * nextnonterminal * last_gae
+            #returns.insert(0, gae + batch.values[ret_step])   # Con el insert vamos agregando al inicio
+        # Obtenemos los valores de retorno
+        returns = advantages + batch.values
 
 
         
@@ -305,7 +321,7 @@ for epoch in range(num_epochs):
 
 
 
-            # Despues de actualizar, hay que ver si debemos reiniciar los ambientes
+            # Despues de actualizar, hay que ver si debemos reiniciar los ambientes  ¡¡NO ES NECESARIO REINICIAR TODOS LOS AMBIENTES!!
             if done.max() == 1:
                 #print("Un ambiente termino!")
                 #print("Total reward:", total_epoch_reward_mean / num_bot_envs)
