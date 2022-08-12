@@ -105,7 +105,7 @@ class Agent(nn.Module):
         #print("logits size:", logits.size())
         split_logits = torch.split(logits, self.envs.action_space.nvec.tolist(), dim=1)   #  (24, 7 * 64)   (7 actions * grid_size)  7 * 64 = 448
         
-        action_mask = torch.Tensor(self.envs.get_action_mask().reshape((24, -1))).to(device)    # shape (24, 64, 78)  sin reshape
+        action_mask = torch.Tensor(self.envs.get_action_mask().reshape((12, -1))).to(device)    # shape (24, 64, 78)  sin reshape
         #print("action mask in get_action:", action_mask)
         #print("action_mask shape:", action_masks.shape)
         #split_action_mask = torch.split(logits, self.envs.action_space.nvec.tolist(), dim=1)
@@ -147,7 +147,7 @@ class Agent(nn.Module):
 num_epochs = args.epochs
 lr = 2.5e-4
 steps_per_episode = args.steps
-num_bot_envs = 24
+num_bot_envs = 12
 num_steps = 256
 gamma = 0.99
 
@@ -160,10 +160,10 @@ np.random.seed(1)
 
 envs = MicroRTSGridModeVecEnv(
     num_selfplay_envs=0,
-    num_bot_envs=24,
+    num_bot_envs=num_bot_envs,   # 12
     max_steps=2000,
     render_theme=2,
-    ai2s=[microrts_ai.coacAI for _ in range(24)],
+    ai2s=[microrts_ai.coacAI for _ in range(12)],
     map_paths=["maps/8x8/basesWorkers8x8.xml"],
     reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0]),
 )
@@ -201,8 +201,18 @@ if args.save_opt:
     route_opt = "ac_optim.pth" 
 
 
+# Aqui guardaremos las rewards por episodio de cada ambiente
 rewards_per_episode = []
-time_alive = []
+time_steps_endings = []
+epochs_per_env = [1] * 12             # Aqui guardaremos la cantidad de epochs finalizadas por ambiente
+steps_per_env = [0] * 12              # Aqui guardamos la cantidad de pasos que lleva la epoch de cada ambiente
+
+
+for i in range(12):
+    rewards_per_episode.append([])    # Guardaremos en cada sublista, las recompensas de cada epoch
+    time_steps_endings.append([])      # Guardaremos en cada sublista, el global step en el que termino cada epoch
+
+
 global_steps = 0
 graph_steps = []
 
@@ -220,71 +230,97 @@ nvec = envs.action_space.nvec
 
 
 for epoch in range(num_epochs):
+    acum_rewards = np.array([0] * 12)                           # Aqui guardaremos las recompensas obtenidas por cada epoch de cada ambiente
+
     obs = next_obs = torch.Tensor(envs.reset()).to(device)      # Obtener observacion inicial
-    #print("Obs shape:", obs.size())
-    total_epoch_reward_mean = 0.
+
     print("Epoch", epoch)
-    
     start = perf_counter()
+
+    #print("Epochs in envs:\n", epochs_per_env)
+    print("Epochs per env sum:", sum(epochs_per_env))
+
+    # Si llegamos a las epochs max en todos los envs... terminar y graficar    (Quick and Dirty pero funciona)
+    if sum(epochs_per_env) >= 12 * num_epochs + 12:
+        print("Finished!")
+        break
+    
+    # Comienza la epoch
     for step in range(steps_per_episode):
         global_steps += 1
         envs.render()
         action_mask = envs.get_action_mask()
-        #print("action mask shape:", action_mask.shape)
         action_mask = action_mask.reshape(-1, action_mask.shape[-1])
-        #print("action mask reshape:", action_mask.shape)
         action_mask[action_mask == 0] = -9e8
 
 
         # Get new action
         action, logprob, entropy, masks = agent.get_action(obs, action_mask)
-        #print("Entropy:", entropy, "  logprob:", logprob)
         state_value = agent.get_value(obs).reshape(-1)
-        #print("State value shape:", state_value.size())
         
+        # Step en environment
         next_obs, reward, done, info = envs.step(action.cpu())
-        #print("Dones shape:", done.shape)
-        total_epoch_reward_mean += reward.sum()
-        #print("Step reward:", reward.mean())
+        acum_rewards = np.add(reward, acum_rewards)
 
+
+       
         # Si algun ambiente termina la partida o es el ultimo step de la epoch,
         # revisamos las recompensas y vemos si guardar red
-        if done.max() == 1 or step == steps_per_episode - 1:
-            #print("Un ambiente termino!")
-            #print("Total reward:", total_epoch_reward_mean / num_bot_envs)
-            #print("step:" ,step)
-            rewards_per_episode.append(total_epoch_reward_mean / num_bot_envs)  # Guadamos la recompensa promedio actual
-            graph_steps.append(global_steps)                                    # Guardamos los pasos que llevamos hasta el momento
+        if done.max() == 1:
+            #print("Done size:", len(done), done)
+            # Revisamos los ambientes que terminaron
+            for i in range(len(done)):
+                # Si termina, añadir punto a las listas  (agrega punto solo si no supera los epochs max)
+                if done[i] == 1 and epochs_per_env[i] <= num_epochs:
+                    rw = acum_rewards.tolist()[i]
+                    rewards_per_episode[i].append(rw)                # Eje Y del grafico
+                    time_steps_endings[i].append(global_steps)       # Eje X del grafico
+                    acum_rewards[i] = 0                              # Reiniciar recompensas
+                    epochs_per_env[i] += 1                           # Aumentar las epocas jugadas en 1
+                    #print("Env", i, "termino epoch", epochs_per_env[i - 1], "con reward", rewards_per_episode[i])
+                    print("Epochs per env sum:", sum(epochs_per_env))
 
+            
+            if sum(epochs_per_env) >= 12 * num_epochs + 12:
+                print("Termino en for de steps!")
+                break
+
+            # SI SE ACABA LA EPOCH "GLOBAL" TODOS LOS ENVS SE REINICIAN Y COMIENZAN DE 0
+
+
+            # ----- EXPERIMENTAL ------ #
+
+            # Aqui no deberia entrar nunca por el momento... no se guarda la red   
             # Si decidimos guardar la red neuronal...
-            if total_epoch_reward_mean / num_bot_envs > max_reward:
-                if args.save:
+            if args.save:
+                if total_epoch_reward_mean / num_bot_envs > max_reward:
                     #print("Saving NN")
                     torch.save(agent, route)
                 if args.save_opt:
                     torch.save(optimizer, route_opt)
 
+            # ----- END EXPERIMENTAL ---- #
+
             stop = perf_counter()
-            time_alive.append(stop-start)                                       # Guardamos el tiempo de la partida
-            print("Reward:", total_epoch_reward_mean / num_bot_envs)
-            print("Time:", stop - start)
-            print("-------\n\n")
+            #print("Time:", stop - start)
+            #print("-------\n\n")
             #break
+
+        # ----- TD optimization ----- #
 
         rs = torch.Tensor(reward).to(device)
         #print("Rewards shape:", rs.size())
 
-        # TD optimization 
         next_obs = torch.Tensor(next_obs).to(device) 
         new_state_value = agent.get_value(next_obs).reshape(-1).to(device)
         #print("Reward shape:", reward.shape)
         #print("new_state_value:", new_state_value.reshape(-1).shape)
         #print("State_value:", state_value.reshape(-1).shape)
-        delta = rs + gamma*new_state_value - state_value
+        delta = rs + gamma*new_state_value*(torch.ones(len(done)).to(device) - torch.Tensor(done).to(device)) - state_value
         #print("delta:", delta)
         
         critic_loss = (delta * delta).mean()
-        actor_loss = (delta * logprob).mean()
+        actor_loss = (delta * -logprob).mean()
 
         total_loss = critic_loss + actor_loss
 
@@ -295,15 +331,18 @@ for epoch in range(num_epochs):
         obs = next_obs
 
         #print("\n--------")
-       
-fig = plt.figure()
-gs = fig.add_gridspec(2, hspace = 2)
-axs = gs.subplots(sharex = True, sharey = False)
-#fig.suptitle("Recompensa y tiempo")
-axs[0].plot(rewards_per_episode)
-axs[0].set_title("Recompensas promedio por episodio")
-axs[1].plot(graph_steps)
-axs[1].set_title("Duración en steps partida promedio")
-#plt.plot(rewards_per_episode)
-plt.show()
+
+        # AYUDA MEMORIA, BORRAR
+        """ rewards_per_episode = []
+time_steps_endings = []
+epochs_per_env = [1] * 12             # Aqui guardaremos la cantidad de epochs finalizadas por ambiente
+steps_per_env = [0] * 12              # Aqui guardamos la cantidad de pasos que lleva la epoch de cada ambiente"""
+
+for i in range(num_bot_envs):
+    plt.plot(list(range(num_epochs)), rewards_per_episode[i])
+    plt.xlabel("Steps in env")
+    plt.ylabel("Rewards")
+    plt.title("Steps vs Rewards    (" + str(num_epochs) + " epochs)")
+    plt.show()
+
 envs.close()
