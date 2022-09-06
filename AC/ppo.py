@@ -33,6 +33,13 @@ parser.add_argument("--capture_video", type=lambda x: bool(strtobool(x)), defaul
         help="Set this flag \"True\" if you want to capture videos of the epochs")
 
 parser.add_argument("--num_steps", type=int, default=512, help="Num of max steps per epoch")
+
+parser.add_argument("--epochs", type=int, default=10, help="Num of epochs to train")
+
+parser.add_argument("--envs", type=int, default=12, help="Num of envs to train")
+
+parser.add_argument("--step_graph", type=int, default=100, help="Cada cuantas epocas muestras el grafico \"epocas vs recompensas\"")
+
 # Procesar argumentos
 args = parser.parse_args()
 
@@ -52,12 +59,11 @@ class AC_Batches:
 
         self.obs = torch.zeros((batch_size, n_envs, h, w, 27)).to(device)          # shape: [batch_size, n_envs, h, w, 27]
         self.actions = torch.zeros((batch_size, n_envs, 7*h*w)).to(device)         # shape: [batch_size, n_evns, 7*h*w]
-        self.logprobs = torch.zeros((batch_size, n_envs, 7*h*w)).to(device)        # shape: [batch_size, n_envs, 7*h*w]
+        self.logprobs = torch.zeros((batch_size, n_envs)).to(device)               # shape: [batch_size, n_envs]
         self.rewards = torch.zeros((batch_size, n_envs)).to(device)                # shape: [batch_size, n_envs]
         self.values = torch.zeros((batch_size, n_envs)).to(device)                 # shape: [batch_size, n_envs]
         self.dones = torch.zeros((batch_size, n_envs)).to(device)                  # shape: [batch_size, n_envs]
-        self.action_masks = np.zeros((batch_size, n_envs, h*w*78))                 # shape: [batch_size, n_envs, h*w*78]  (en numpy array)
-        print("In batch constructor:", self.action_masks.shape)
+        self.action_masks = np.zeros((batch_size, n_envs*h*w, 78))                 # shape: [batch_size, n_envs*h*w, 78]  (en numpy array)
     
       
     # Guardar una observacion y una action mask
@@ -70,27 +76,31 @@ class AC_Batches:
         self.values[step] = value
         self.dones[step] = done
         self.action_masks[step] = action_masks
+        #print("Action masks shape:", action_masks.shape)
+        #print("Action mask saved:", self.action_masks[step])
 
-        """print("In batch:")
-        print("obs shape:", obs.size())
-        print("action shape:", action.size())
-        print("logprob shape:", logprob.size())
-        print("reward shape:", reward.size())
-        print("value shape:", value.size())
-        print("dones shape:", done.size())
-        print("action_mask batch shape:", self.action_masks.shape)
-        print("action mask shape:", action_masks.shape)"""
+        #print("In batch:")
+        #print("obs shape:", obs.size())
+        #print("action shape:", action.size())
+        #print("logprob shape:", logprob.size())
+        #print("reward shape:", reward.size())
+        #print("value shape:", value.size())
+        #print("dones shape:", done.size())
+        #print("action_mask batch shape:", self.action_masks.shape)
+        #print("action mask shape:", action_masks.shape)
 
 
 
 class CategoricalMasked(Categorical):
-    def __init__(self, probs=None, logits=None, validate_args=None, masks=[], sw=None):
+    def __init__(self, probs=None, logits=None, validate_args=None, masks=[], sw=None, show_mask=False):
         self.masks = masks
         #print("Mask recibida en numpy:", masks)
         if len(self.masks) == 0:
             super(CategoricalMasked, self).__init__(probs, logits, validate_args)
         else:
             self.masks = masks.type(torch.BoolTensor).to(device)
+            if sw:
+                print(self.masks)
             logits = torch.where(self.masks, logits, torch.tensor(-1e+8, device=device))
             super(CategoricalMasked, self).__init__(probs, logits, validate_args)
 
@@ -127,34 +137,33 @@ class Agent(nn.Module):
         return self.network(x.permute((0, 3, 1, 2)))
 
     def get_action(self, x, action=None, action_masks=None, envs=None):
-        #print("obs input dim:", obs.size())
-        logits = self.actor(self.forward(x))
+        # Siempre entra x (obs) de shape [n_envs, h, w, 27]
+        logits = self.actor(self.forward(x))    # [n_envs, 78hw]
         split_logits = torch.split(logits, self.envs.action_space.nvec.tolist(), dim=1)   #  (24, 7 * hw)   (7 actions * grid_size)  7 * 64 = 448
-        
-        # Si no se da la accion, es porque 
+        # Si se da la action mask, siempre es de shape [12*hw, 78]
+
+        # La mascara cuando la accion es None, debe tener shape  [num_envs, 4992]
         if action == None:
             action_mask = torch.Tensor(self.envs.get_action_mask().reshape((num_envs, -1))).to(device)    # shape (24, hw, 78)  sin reshape
-            #print("action mask in get_action:", action_mask)
-            #print("action_mask shape:", action_masks.shape)
-            #split_action_mask = torch.split(logits, self.envs.action_space.nvec.tolist(), dim=1)
 
             split_action_mask = torch.split(action_mask, self.envs.action_space.nvec.tolist(), dim=1)
             multi_categoricals = [CategoricalMasked(logits=logits, masks=ams) for (logits, ams) in zip(split_logits, split_action_mask)]
             action = torch.stack([categorical.sample() for categorical in multi_categoricals])
 
+        # La mascara cuando la accion es dada, debe tener shape [minibatch_size, 4992]
         else:
-            
-            print("Split logits size:", len(split_logits), split_logits[0].size())
-            action_mask = torch.Tensor(action_masks)#.reshape((-1, 4992))).to(device)
+            action = action.view(-1, action.size()[-1]).T    # Trasponer accion para calzar con action mask
+            # NO DEBO CAMBIAR LOS 0'S POR -9E8!!!!!
+            action_mask = torch.Tensor(action_masks).reshape((-1, self.envs.action_space.nvec.sum())).to(device)  # [num_envs, 4992]
+            #print("Action shape:", action.size())
+            #print("Action mask shape:", action_mask.size())
             split_action_mask = torch.split(action_mask, self.envs.action_space.nvec.tolist(), dim=1)
-            print("Split action masks size:", len(split_action_mask), split_action_mask[0].size())
             multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(split_logits, split_action_mask)]
-            # Ahora hay que redimensionar las acciones...
+            # LA MASCARA SE ESTA APLICANDO MAL EN  MULTI_CATEGORICALS!!!
 
 
         # Retornar logpobs, entropia, accion y action_mask
         logprob = torch.stack([categorical.log_prob(a) for a, categorical in zip(action, multi_categoricals)])
-        #print("logprob size:", logprob.size())
 
         entropy = torch.stack([categorical.entropy() for categorical in multi_categoricals])
 
@@ -167,15 +176,12 @@ class Agent(nn.Module):
         #print("action mask shape:", action_mask.size())
         #print("action size:", action.size())  # same num_predicted_par 448
 
-        #print("action:\n", action)
-        #print("logprob size:", logprob.size())
-        #print("entropy size:", entropy.size())
-        #print("logprob sum:", logprob.sum())
-        #print("entroy sum:", entropy.sum())
-        #print(logprob)
-        #print(entropy)
+
+        #print("logprob shape:", logprob.sum(1).size())     # [12]  logprob por ambiente
+        #print("entropy shape:", entropy.sum(1).size())
+        #print("logprob of this action:", logprob.sum(1))    # logprob.sum(1).sum()
         
-        return action, logprob.sum(1).sum(), entropy.sum(1).sum(), action_mask
+        return action, logprob.sum(1), entropy.sum(1), action_mask
     
 
     def get_value(self, x):
@@ -184,10 +190,10 @@ class Agent(nn.Module):
 
 
 # Hiperparametros
-num_epochs = 10
+num_epochs = args.epochs
 lr = 2.5e-4
 #steps_per_episode = 100000
-num_envs = 12
+num_envs = args.envs
 num_steps = args.num_steps    # 512 por defecto
 gamma = 0.99
 epsilon = 0.2
@@ -197,6 +203,11 @@ batch_size = num_steps   # De momento el batch_size y num_steps son lo mismo
 n_minibatches = 4
 minibatch_size = batch_size // n_minibatches     # El batch se divide en "n_minibatches" minibatches
 update_epochs = 4   # Por cada epoch, se actualizara 4 veces, creando 4 nuevos minibatches cada vez
+
+
+# Respecto al grafico
+rewards_per_episode = []
+
 
 
 # Device
@@ -211,7 +222,7 @@ envs = MicroRTSGridModeVecEnv(
     num_bot_envs=num_envs,
     max_steps=2000,
     render_theme=2,
-    ai2s=[microrts_ai.coacAI for _ in range(12)],
+    ai2s=[microrts_ai.coacAI for _ in range(num_envs)],
     map_paths=["maps/8x8/basesWorkers8x8.xml"],
     reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0]),
 )
@@ -248,7 +259,8 @@ for epoch in range(num_epochs):
     # Guardamos la observacion en numpy array para uno usar tensores
     next_obs = envs.reset()
     next_dones = torch.zeros(num_envs).to(device)
-
+    ep_reward = 0
+    ep_done = [0] * num_envs
 
     # Para usar la observacion en la red neuronal, la usamos como tensor
     #obs = next_obs = torch.Tensor(obs).to(device)      # Obtener observacion inicial
@@ -264,8 +276,12 @@ for epoch in range(num_epochs):
 
         # Guardar observaciones
         action_mask = envs.get_action_mask()
-        action_mask = action_mask.reshape(-1, action_mask.shape[-1])   # Este reshape es para establecer todos los 0 como -9e8
-        action_mask[action_mask == 0] = -9e8
+        action_mask = action_mask.reshape(-1, action_mask.shape[-1])   # Este reshape es para establecer todos los 0 como -9e8  [n_envs*hw, 78]
+        #action_mask[action_mask == 0] = -9e8
+
+        #print("Action mask main shape:", action_mask.shape)
+        #print("Action maks reshaped:", action_mask.reshape((num_envs, -1)).shape)
+        #print("Action mask main:", action_mask)
 
         # Obtenemos acciones y valores sin usar autograd
         with torch.no_grad():
@@ -280,11 +296,17 @@ for epoch in range(num_epochs):
         rs = torch.Tensor(reward).to(device)
         total_epoch_reward_mean += reward.sum()
 
+        print("Reward type:", type(reward))
+        ep_reward += reward
+
         # Aqui debe hacerse el save in batch
-        batch.save_in_batch(step, obs, action, logprob, rs, state_value, next_dones, action_mask.reshape((num_envs, 8*8*78)))
+        # Action mask before save shape: [n_envs*hw, 78]
+        batch.save_in_batch(step, obs, action, logprob, rs, state_value, next_dones, action_mask)
 
         
 
+    # AQUI ACABO EL EPISODIO!
+    rewards_per_episode.append(ep_reward)
     # Cuando se ejecuten la cantidad de pasos maxima por epoch, es decir, num_steps pasos...
     # el batch se llena y por lo tanto, dividir en minibatches y actualizar
     # Antes de obtener el minibatch, hay que obtener los valores de Ventaja con el GAE y todo eso
@@ -319,6 +341,7 @@ for epoch in range(num_epochs):
 
 
     # Cuando se obtienen, actualizar
+    #exit()
     print("----- ACTUALIZANDO! -----")
         
     # Copiando aqui lo del batch del paper para ver dimensiones
@@ -327,15 +350,18 @@ for epoch in range(num_epochs):
     b_actions = batch.actions.reshape((-1,)+action_space_shape)
     b_advantages = advantages.reshape(-1)
     b_returns = returns.reshape(-1)
-    b_action_masks = batch.action_masks.reshape((-1,)+action_mask_shape)
+    b_action_masks = batch.action_masks.reshape((-1,)+action_mask_shape)   # EL PROBLEMA DE DIMENSIÓN ESTÁ AQUI
 
-    print("Sobre el batch del paper:")
-    print("obs:", b_obs.size())
-    print("logprobs:", b_logprobs.size())
-    print("actions:", b_actions.size())
-    print("advantages:", b_advantages.size())
-    print("returns:", b_returns.size())
-    print("action_masks:", b_action_masks.shape)
+    """print("Sobre el batch del paper:")
+    print("obs:", b_obs.size())                    # [b_size*n_envs, h, w, 27] 
+    print("logprobs:", b_logprobs.size())          # [b_size*n_envs*hw*7]
+    print("logprobs:", b_logprobs)
+    print("actions:", b_actions.size())            # [b_size*n_envs, hw*7]     [240, 448]
+    print("advantages:", b_advantages.size())      # [b_size*envs]
+    print("returns:", b_returns.size())            # [b_size*envs]
+    print("action_masks:", b_action_masks.shape)   # [b_size*n_envs, hw*78]    [240, 4992]
+
+    print("----------\n\n")"""
     # Actualizar red si se cumple con los pasos
     # Obtener minibatches
     # Aqui si necesitamos el grafico de autograd, por lo que debemos usar todo en tensores!
@@ -347,20 +373,50 @@ for epoch in range(num_epochs):
         for start in range(0, batch_size, minibatch_size):    # desde 0 hasta batch_size con pasos del tamano del minibatch
             end = start + minibatch_size
             minibatch_ind = inds[start:end]   # Indices correspondientes a los estados del minibatch
-            mb_advantages = advantages[minibatch_ind]
+            mb_advantages = b_advantages[minibatch_ind]
+            #print("mb_advantages shape:", mb_advantages.size())
+
+            #print("b_obs minibatch shape:", b_actions[minibatch_ind].shape)
+            #print("b_action_masks minibatch shape:", b_action_masks[minibatch_ind].shape)
 
             _, newlogprobs, newentropy, _ = agent.get_action(b_obs[minibatch_ind], b_actions[minibatch_ind], b_action_masks[minibatch_ind], envs)
-            # Aqui hay que obtener el ratio
 
+            ratio = (newlogprobs - b_logprobs[minibatch_ind]).exp()
+            #print("newlogprobs:", newlogprobs.exp())
+            #print("b_logprobs minibatch:", b_logprobs[minibatch_ind].exp())
+            #print("Ratio:", ratio)
+            
+            # Loss
+            loss_1 = -mb_advantages * ratio
+            loss_2 = -mb_advantages * torch.clamp(ratio, 1 - epsilon, 1 + epsilon)   # Clip el ratio
+            pg_loss = torch.max(loss_1, loss_2).mean()
+            entropy_loss = newentropy.mean()
+
+            # New values of Critic
+            new_values = agent.get_value(b_obs[minibatch_ind]).view(-1)
+            # Critic loss
+            critic_loss = ((new_values - b_returns[minibatch_ind])**2).mean()
+
+            # Total loss
+            loss = pg_loss - 0.01 * entropy_loss + 0.5*critic_loss*0.5
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+
+    """if epoch % args.step_graph == 0:
+        plt.plot(list(range(epoch+1)), rewards_per_episode)
+        plt.xlabel("Epochs")
+        plt.ylabel("Rewards")
+        plt.title("Epochs vs Rewards      (" + str(num_epochs) + " epochs)")
+        plt.show()"""
     #print("\n--------")
        
-fig = plt.figure()
-gs = fig.add_gridspec(2, hspace = 2)
-axs = gs.subplots(sharex = True, sharey = False)
-fig.suptitle("Recompensa y tiempo")
-axs[0].plot(rewards_per_episode)
-axs[1].plot(time_alive)
-plt.plot(rewards_per_episode)
+plt.plot(list(range(num_epochs)), rewards_per_episode)
+plt.xlabel("Epochs")
+plt.ylabel("Rewards")
+plt.title("Epochs vs Rewards      (" + str(num_epochs) + " epochs)")
 plt.show()
 input()
 envs.close()
