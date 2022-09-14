@@ -38,7 +38,7 @@ parser.add_argument("--epochs", type=int, default=10, help="Num of epochs to tra
 
 parser.add_argument("--envs", type=int, default=12, help="Num of envs to train")
 
-parser.add_argument("--step_graph", type=int, default=100, help="Cada cuantas epocas muestras el grafico \"epocas vs recompensas\"")
+parser.add_argument("--graph_freq", type=int, default=100, help="Cada cuantas epocas muestras el grafico \"epocas vs recompensas\"")
 
 # Procesar argumentos
 args = parser.parse_args()
@@ -206,7 +206,8 @@ update_epochs = 4   # Por cada epoch, se actualizara 4 veces, creando 4 nuevos m
 
 
 # Respecto al grafico
-rewards_per_episode = []
+rewards_per_episode = []    # Aqui se guardan las rewards por episodio con respectivo ambiente
+
 
 
 
@@ -253,19 +254,30 @@ envs.action_space.seed(0)
 nvec = envs.action_space.nvec
 #print("nvec:", nvec)   # [6, 4, 4, 4, 4, 7, 49, .....]
 
+
+epoch_steps = 0
 # Cuantas epocas vamos a entrenar
 for epoch in range(num_epochs):
 
     # Guardamos la observacion en numpy array para uno usar tensores
     next_obs = envs.reset()
     next_dones = torch.zeros(num_envs).to(device)
-    ep_reward = 0
-    ep_done = [0] * num_envs
+
+    # Para grafico de "epoch vs reward"
+    ep_reward = [0] * num_envs
+    ep_dones = np.zeros(num_envs)
+
+    # Para grafico de "step vs reward"
+    step_reward = []
+
+    # If an env wins, plot step graph
+    win_plot = False
 
     # Para usar la observacion en la red neuronal, la usamos como tensor
     #obs = next_obs = torch.Tensor(obs).to(device)      # Obtener observacion inicial
     total_epoch_reward_mean = 0.
     print("Epoch", epoch)
+    epoch_steps = 0                # Guardaremos cuantos pasos da en la epoch
     
     start = perf_counter()
     for step in range(num_steps):
@@ -296,17 +308,43 @@ for epoch in range(num_epochs):
         rs = torch.Tensor(reward).to(device)
         total_epoch_reward_mean += reward.sum()
 
-        print("Reward type:", type(reward))
-        ep_reward += reward
+        # Para no contar rewards de envs que ya terminaron su primera partida
+        ep_reward += np.where(ep_dones.astype(bool), 0., reward)   # Mascara de ambientes finalizados
+        ep_dones = np.where(done == 1, 1, ep_dones)                # Actualizar mascara de ambientes finalizados
 
+        if any(e >= 10 for e in reward):
+            win_plot = True
+            print("Un ambiente gano en epoch", epoch, "en step", step)
+        
+        # Aqui poner lo de los step rewards
+        step_reward.append(ep_reward.copy())         
+       
         # Aqui debe hacerse el save in batch
         # Action mask before save shape: [n_envs*hw, 78]
         batch.save_in_batch(step, obs, action, logprob, rs, state_value, next_dones, action_mask)
+        
+        """# Revisamos si todos los ambientes terminaron
+        if np.all((ep_dones == 1)):
+            epoch_steps = step + 1   # Registramos cuantos steps se hicieron en la epoch hasta que todos los ambientes perdieron
+            #print("Todos los ambientes terminaron! en el step ", epoch_steps)"""
+
 
         
 
     # AQUI ACABO EL EPISODIO!
-    rewards_per_episode.append(ep_reward)
+    rewards_per_episode.append(ep_reward)    # Se guardan las recompensas totales de los ambientes en la epoch
+    
+    # Grafico de steps (con cierta frecuencia y al final del entrenamiento)
+    if (epoch == num_epochs % args.graph_freq or epoch == num_epochs - 1 or win_plot) and epoch != 0:
+        plt.plot(list(range(num_steps)), step_reward)    # CHANGE! num_steps por epoch_steps
+        plt.xlabel("Step")
+        plt.ylabel("Rewards")
+        plt.title("Step vs Rewards    (epoch" + str(epoch) + ")")
+        plt.savefig("steps_epoch_" + str(epoch) + ".png")
+        plt.close()
+
+
+
     # Cuando se ejecuten la cantidad de pasos maxima por epoch, es decir, num_steps pasos...
     # el batch se llena y por lo tanto, dividir en minibatches y actualizar
     # Antes de obtener el minibatch, hay que obtener los valores de Ventaja con el GAE y todo eso
@@ -315,13 +353,13 @@ for epoch in range(num_epochs):
     with torch.no_grad():
         last_value = agent.get_value(torch.Tensor(next_obs).to(device)).reshape(-1)   # Tensor del ultimo estado al terminar la epoch
         advantages = torch.zeros_like(batch.rewards).to(device)
-        print("Last value shape:", last_value.size())
+        #print("Last value shape:", last_value.size())
         # Obtener los retornos
         #batch.values = batch.values + [last_value]   # Añadir el ultimo valor al batch
         last_gae = 0
         #returns = []
 
-        for ret_step in reversed(range(len(batch.rewards))):
+        for ret_step in reversed(range(len(batch.rewards))): 
             if ret_step == num_steps - 1:
                 nextnonterminal = 1.0 - dones
                 delta = batch.rewards[ret_step] + gamma * gae * last_value * nextnonterminal - batch.values[ret_step]
@@ -351,6 +389,7 @@ for epoch in range(num_epochs):
     b_advantages = advantages.reshape(-1)
     b_returns = returns.reshape(-1)
     b_action_masks = batch.action_masks.reshape((-1,)+action_mask_shape)   # EL PROBLEMA DE DIMENSIÓN ESTÁ AQUI
+    
 
     """print("Sobre el batch del paper:")
     print("obs:", b_obs.size())                    # [b_size*n_envs, h, w, 27] 
@@ -367,10 +406,13 @@ for epoch in range(num_epochs):
     # Aqui si necesitamos el grafico de autograd, por lo que debemos usar todo en tensores!
     inds = np.arange(batch_size)
 
+
     for e in range(update_epochs):
         random.shuffle(inds)
 
+
         for start in range(0, batch_size, minibatch_size):    # desde 0 hasta batch_size con pasos del tamano del minibatch
+            # CHANGE in range... batch_size por num_steps
             end = start + minibatch_size
             minibatch_ind = inds[start:end]   # Indices correspondientes a los estados del minibatch
             mb_advantages = b_advantages[minibatch_ind]
@@ -378,7 +420,7 @@ for epoch in range(num_epochs):
 
             #print("b_obs minibatch shape:", b_actions[minibatch_ind].shape)
             #print("b_action_masks minibatch shape:", b_action_masks[minibatch_ind].shape)
-
+            
             _, newlogprobs, newentropy, _ = agent.get_action(b_obs[minibatch_ind], b_actions[minibatch_ind], b_action_masks[minibatch_ind], envs)
 
             ratio = (newlogprobs - b_logprobs[minibatch_ind]).exp()
@@ -405,18 +447,12 @@ for epoch in range(num_epochs):
             optimizer.step()
 
 
-    """if epoch % args.step_graph == 0:
-        plt.plot(list(range(epoch+1)), rewards_per_episode)
-        plt.xlabel("Epochs")
-        plt.ylabel("Rewards")
-        plt.title("Epochs vs Rewards      (" + str(num_epochs) + " epochs)")
-        plt.show()"""
-    #print("\n--------")
-       
+      
 plt.plot(list(range(num_epochs)), rewards_per_episode)
 plt.xlabel("Epochs")
 plt.ylabel("Rewards")
 plt.title("Epochs vs Rewards      (" + str(num_epochs) + " epochs)")
+plt.savefig("run_" + str(num_epochs) + "epochs.png")
 plt.show()
 input()
 envs.close()
