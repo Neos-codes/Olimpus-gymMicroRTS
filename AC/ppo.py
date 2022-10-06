@@ -1,5 +1,6 @@
 import sys
 import numpy as np
+import csv
 
 import torch
 import torch.nn as nn
@@ -40,9 +41,14 @@ parser.add_argument("--envs", type=int, default=12, help="Num of envs to train")
 
 parser.add_argument("--graph_freq", type=int, default=100, help="Cada cuantas epocas muestras el grafico \"epocas vs recompensas\"")
 
+parser.add_argument("--load", type=str, default="", help="Path to load a model")
+
+parser.add_argument("--save", type=str, default="", help="Path to save the model")
+
+parser.add_argument("--csv", type=str, default="", help="Path to save a csv table")
+
 # Procesar argumentos
 args = parser.parse_args()
-
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -76,8 +82,6 @@ class AC_Batches:
         self.values[step] = value
         self.dones[step] = done
         self.action_masks[step] = action_masks
-        #print("Action masks shape:", action_masks.shape)
-        #print("Action mask saved:", self.action_masks[step])
 
         #print("In batch:")
         #print("obs shape:", obs.size())
@@ -189,16 +193,22 @@ class Agent(nn.Module):
 
 
 
+
+# Init epochs (si guardamos, llevaremos la cuenta de cuantos episodios se han entrenado en total)
+init_epochs = 0
+
 # Hiperparametros
-num_epochs = args.epochs
 lr = 2.5e-4
-#steps_per_episode = 100000
-num_envs = args.envs
-num_steps = args.num_steps    # 512 por defecto
 gamma = 0.99
 epsilon = 0.2
 gae = 0.95
 
+# Sobre pasos, ambientes y epocas
+num_epochs = args.epochs
+num_envs = args.envs
+num_steps = args.num_steps    # 512 por defecto
+
+# Sobre el batch
 batch_size = num_steps   # De momento el batch_size y num_steps son lo mismo
 n_minibatches = 4
 minibatch_size = batch_size // n_minibatches     # El batch se divide en "n_minibatches" minibatches
@@ -207,8 +217,6 @@ update_epochs = 4   # Por cada epoch, se actualizara 4 veces, creando 4 nuevos m
 
 # Respecto al grafico
 rewards_per_episode = []    # Aqui se guardan las rewards por episodio con respectivo ambiente
-
-
 
 
 # Device
@@ -246,8 +254,21 @@ rewards_per_episode = []
 time_alive = []
 
 envs.action_space.seed(0)
+# Load model
+if args.load != "":
+    print("Cargando modelo...")
+    checkpoint = torch.load(args.load)
+    init_epochs = checkpoint["num_epochs"]
+    print("num_steps: %d\nnum_envs: %d\nnum_epochs: %d"%(checkpoint["num_steps"], checkpoint["num_envs"], checkpoint["num_epochs"]))
+    agent.load_state_dict(checkpoint["model"])
+    agent.train()
+    optimizer.load_state_dict(checkpoint["optim"])
+    num_steps = checkpoint["num_steps"]
+    num_envs = checkpoint["num_envs"]
+
 #obs = torch.Tensor(envs.reset()).to(device)
 
+print("GPU:", torch.cuda.get_device_name(0))
 #agent.get_action(obs, envs=envs)
 
 #print("Obs size:", obs.shape)    # (24, 8, 8, 27)
@@ -278,6 +299,7 @@ for epoch in range(num_epochs):
     total_epoch_reward_mean = 0.
     print("Epoch", epoch)
     epoch_steps = 0                # Guardaremos cuantos pasos da en la epoch
+    ep_finished = False
     
     start = perf_counter()
     for step in range(num_steps):
@@ -323,25 +345,35 @@ for epoch in range(num_epochs):
         # Action mask before save shape: [n_envs*hw, 78]
         batch.save_in_batch(step, obs, action, logprob, rs, state_value, next_dones, action_mask)
         
-        """# Revisamos si todos los ambientes terminaron
-        if np.all((ep_dones == 1)):
-            epoch_steps = step + 1   # Registramos cuantos steps se hicieron en la epoch hasta que todos los ambientes perdieron
+        # Revisamos si todos los ambientes terminaron
+        if np.all((ep_dones == 1)) and not ep_finished:
+            time_alive.append(step)
+            print("Termino en step:", step)
+            ep_finished = True
+            #break     # Descomentar si quieres que termine una vez todos los ambientes terminen una vez
+            # epoch_steps = step + 1   # Registramos cuantos steps se hicieron en la epoch hasta que todos los ambientes perdieron
             #print("Todos los ambientes terminaron! en el step ", epoch_steps)"""
 
 
         
 
     # AQUI ACABO EL EPISODIO!
+    print("Last step:", step)
+    if not ep_finished:
+        time_alive.append(step)
     rewards_per_episode.append(ep_reward)    # Se guardan las recompensas totales de los ambientes en la epoch
     
     # Grafico de steps (con cierta frecuencia y al final del entrenamiento)
-    if (epoch == num_epochs % args.graph_freq or epoch == num_epochs - 1 or win_plot) and epoch != 0:
-        plt.plot(list(range(num_steps)), step_reward)    # CHANGE! num_steps por epoch_steps
+    if (epoch % args.graph_freq == 0 or epoch == num_epochs - 1 or win_plot) and epoch != 0:
+        # Grafico Steps vs Rewards
+        x_list = list(range(step + 1))
+        plt.plot(x_list, step_reward)
         plt.xlabel("Step")
         plt.ylabel("Rewards")
         plt.title("Step vs Rewards    (epoch" + str(epoch) + ")")
         plt.savefig("steps_epoch_" + str(epoch) + ".png")
         plt.close()
+       
 
 
 
@@ -405,14 +437,17 @@ for epoch in range(num_epochs):
     # Obtener minibatches
     # Aqui si necesitamos el grafico de autograd, por lo que debemos usar todo en tensores!
     inds = np.arange(batch_size)
+    
+    # Si queremos que la epoch termine una vez acaben todos los ambientes por primera vez, descomentar abajo
+    #inds = np.arange(step + 1)         # CHANGE 
+    #batch_size = len(inds)             # CHANGE
+    #minibatch_size = batch_size // 4   # CHANGE
 
 
     for e in range(update_epochs):
         random.shuffle(inds)
 
-
         for start in range(0, batch_size, minibatch_size):    # desde 0 hasta batch_size con pasos del tamano del minibatch
-            # CHANGE in range... batch_size por num_steps
             end = start + minibatch_size
             minibatch_ind = inds[start:end]   # Indices correspondientes a los estados del minibatch
             mb_advantages = b_advantages[minibatch_ind]
@@ -447,12 +482,66 @@ for epoch in range(num_epochs):
             optimizer.step()
 
 
-      
+# Mean Rewards
+mean_rewards = [sum(r)/len(r) for r in rewards_per_episode]
+
+# Guardar modelo y tabla csv
+if args.save != "":
+    print("Guardando modelo...")
+    torch.save({
+        "num_epochs": num_epochs + init_epochs,
+        "num_envs": num_envs,
+        "num_steps": num_steps,
+        "model": agent.state_dict(),
+        "optim": optimizer.state_dict()
+        }, args.save + ".pth")
+    
+    print("Creando CSV")
+    csv_name = args.csv if args.csv != "" else args.load
+    with open(csv_name + ".csv", "w" if args.load == "" else "a") as data:
+        csv_w = csv.writer(data)
+
+        # Si es la primera vez que entrenamos la red, colocar nombres a las columnas
+        if args.load == "":
+            csv_w.writerow([("env_%d"%(ne)) for ne in range(num_envs)] + ["Mean Reward"])
+
+        # Escribir columnas de recompensa por ambiente y recompensa promedio en csv
+        for i in range(num_epochs):
+            csv_w.writerow(rewards_per_episode[i].tolist() + [mean_rewards[i]])
+
+
+plot_legend = []
+for i in range(num_envs):
+    plot_legend.append("env " + str(i))
+
+
 plt.plot(list(range(num_epochs)), rewards_per_episode)
 plt.xlabel("Epochs")
 plt.ylabel("Rewards")
 plt.title("Epochs vs Rewards      (" + str(num_epochs) + " epochs)")
-plt.savefig("run_" + str(num_epochs) + "epochs.png")
+plt.legend(plot_legend)
+plt.savefig("run_" + str(num_epochs) + "_epochs.png")
 plt.show()
-input()
+plt.close()
+
+# Grafico Epochs vs Rewards suavizado
+plt.plot(list(range(num_epochs)), mean_rewards)
+plt.xlabel("Epochs")
+plt.ylabel("Mean Rewards")
+plt.title("Epochs vs Mean Rewards     (%s envs  %s epochs)"%(num_envs, num_epochs))
+plt.savefig("run_" + str(num_epochs) + "mean_reward_epochs.png")
+plt.show()
+plt.close()
+
+
+
+# Grafico Epochs vs Max Time Alive
+plt.plot(list(range(len(time_alive))), time_alive)
+plt.xlabel("Epochs")
+plt.ylabel("Steps")
+plt.title("Epochs vs Steps    (" + str(num_epochs) + " epochs)")
+plt.savefig("epochs_vs_steps_epochs_" + str(num_epochs) + ".png")
+plt.show()
+plt.close()
+
 envs.close()
