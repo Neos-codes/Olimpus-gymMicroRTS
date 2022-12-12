@@ -18,7 +18,7 @@ from time import perf_counter
 import random
 import os
 
-from stable_baselines3.common.vec_env import VecEnvWrapper, VecVideoRecorder
+#from stable_baselines3.common.vec_env import VecEnvWrapper, VecVideoRecorder
 
 
 torch.set_printoptions(threshold=sys.maxsize)
@@ -196,6 +196,7 @@ class Agent(nn.Module):
     def get_action(self, x, action=None, action_masks=None, envs=None):
         # Siempre entra x (obs) de shape [n_envs, h, w, 27]
         logits = self.actor(self.forward(x))    # [n_envs, 78hw]
+        #print("logits size:", logits.size())
         split_logits = torch.split(logits, self.envs.action_space.nvec.tolist(), dim=1)   #  (24, 7 * hw)   (7 actions * grid_size)  7 * 64 = 448
         # Si se da la action mask, siempre es de shape [12*hw, 78]
 
@@ -228,14 +229,16 @@ class Agent(nn.Module):
         logprob = logprob.T.view(-1, num_predicted_parameters)
         entropy = entropy.T.view(-1, num_predicted_parameters)
         action = action.T.view(-1, num_predicted_parameters)
+        #print("Action final dim:", action.size())
+        #print("action size:", action.size())
         #print("nvec.sum:", self.envs.action_space.nvec.sum())
         action_mask = action_mask.view(-1, self.envs.action_space.nvec.sum())
         #print("action mask shape:", action_mask.size())
         #print("action size:", action.size())  # same num_predicted_par 448
 
 
-        #print("logprob shape:", logprob.sum(1).size())     # [12]  logprob por ambiente
-        #print("entropy shape:", entropy.sum(1).size())
+        #print("logprob shape:", logprob.sum(1).size())     # [n_envs]  logprob por ambiente
+        #print("entropy shape:", entropy.sum(1).size())     # [n_envs]  entropy por ambiente
         #print("logprob of this action:", logprob.sum(1))    # logprob.sum(1).sum()
         
         return action, logprob.sum(1), entropy.sum(1), action_mask
@@ -290,6 +293,8 @@ envs = MicroRTSGridModeVecEnv(
 )
 # envs = VecVideoRecorder(envs, 'videos', record_video_trigger=lambda x: x % 4000 == 0, video_length=2000)
 
+#print("envs nvec:", envs.action_space.nvec)
+
 
 if args.capture_video:
     envs = VecVideoRecorder(envs, "videos/AC_batches", record_video_trigger=lambda x: x == 0, video_length = 2000)
@@ -305,6 +310,7 @@ action_mask_shape = (envs.action_space.nvec.sum(),)
 optimizer = optim.Adam(agent.parameters(), lr=lr, eps=1e-5)
 rewards_per_episode = []
 time_alive = []
+steps_per_epoch = []
 
 envs.action_space.seed(0)
 # Load model
@@ -335,6 +341,7 @@ for epoch in range(num_epochs):
 
     # Guardamos la observacion en numpy array para uno usar tensores
     next_obs = envs.reset()
+    #print("Next obs type:", next_obs.dtype)
     next_dones = torch.zeros(num_envs).to(device)
 
     # Para grafico de "epoch vs reward"
@@ -351,7 +358,7 @@ for epoch in range(num_epochs):
     #obs = next_obs = torch.Tensor(obs).to(device)      # Obtener observacion inicial
     total_epoch_reward_mean = 0.
     print("Epoch", epoch)
-    epoch_steps = 0                # Guardaremos cuantos pasos da en la epoch
+    epoch_steps = np.zeros(args.envs)                # Guardaremos cuantos pasos da en la epoch
     ep_finished = False
     
     start = perf_counter()
@@ -359,6 +366,7 @@ for epoch in range(num_epochs):
         envs.render()
 
         obs = torch.Tensor(next_obs).to(device)
+        #print("obs dtype:", obs.dtype)
         #print("obs shape:", obs.size())
 
         # Guardar observaciones
@@ -387,6 +395,12 @@ for epoch in range(num_epochs):
         ep_reward += np.where(ep_dones.astype(bool), 0., reward)   # Mascara de ambientes finalizados
         ep_dones = np.where(done == 1, 1, ep_dones)                # Actualizar mascara de ambientes finalizados
 
+        # Contar steps de los ambientes no finalizados
+        steps_plus_one = epoch_steps + 1
+        epoch_steps = np.where(ep_dones == 0, steps_plus_one, epoch_steps)  # Mascara para auemtnar pasos en envs no finalizados
+
+
+
         if any(e >= 10 for e in reward):
             win_plot = True
             print("Un ambiente gano en epoch", epoch, "en step", step)
@@ -401,10 +415,11 @@ for epoch in range(num_epochs):
         # Revisamos si todos los ambientes terminaron
         if np.all((ep_dones == 1)) and not ep_finished:
             time_alive.append(step)
-            print("Termino en step:", step)
+            print(epoch_steps)
+            #steps_per_epoch.append(np.array(epoch_steps).mean())
             ep_finished = True
-            #break     # Descomentar si quieres que termine una vez todos los ambientes terminen una vez
-            # epoch_steps = step + 1   # Registramos cuantos steps se hicieron en la epoch hasta que todos los ambientes perdieron
+            break     # Descomentar si quieres que termine una vez todos los ambientes terminen una vez
+            #epoch_steps = step + 1   # Registramos cuantos steps se hicieron en la epoch hasta que todos los ambientes perdieron
             #print("Todos los ambientes terminaron! en el step ", epoch_steps)"""
 
 
@@ -412,22 +427,36 @@ for epoch in range(num_epochs):
 
     # AQUI ACABO EL EPISODIO!
     end = perf_counter()
+    steps_per_epoch.append(np.array(epoch_steps).mean())
     print("epoch duration:", end - start)
     print("Last step:", step)
+    print("Ep rewards:", ep_reward)
+    print("Mean reward:", np.array(ep_reward).mean())
     if not ep_finished:
         time_alive.append(step)
     rewards_per_episode.append(ep_reward)    # Se guardan las recompensas totales de los ambientes en la epoch
     
     # Grafico de steps (con cierta frecuencia y al final del entrenamiento)
     if (epoch % args.graph_freq == 0 or epoch == num_epochs - 1 or win_plot) and epoch != 0:
-        # Grafico Steps vs Rewards
+        # Esto debe reemplazarse por un csv
+       with open(str(epoch) + ".csv", "w") as data:
+        csv_w = csv.writer(data)
+
+        col_names = ["step", "env_0", "env_1", "env_2", "env_4", "Mean reward"]
+        csv_w.writerow(col_names)
+
+        for i in range(step + 1):
+            csv_w.writerow([*[i], *step_reward[i], *[np.array(step_reward[i]).mean()]])
+
+
+        """# Grafico Steps vs Rewards
         x_list = list(range(step + 1))
         plt.plot(x_list, step_reward)
         plt.xlabel("Step")
         plt.ylabel("Rewards")
         plt.title("Step vs Rewards    (epoch" + str(epoch) + ")")
         plt.savefig("steps_epoch_" + str(epoch) + ".png")
-        plt.close()
+        plt.close()"""
        
 
 
@@ -481,24 +510,26 @@ for epoch in range(num_epochs):
     """print("Sobre el batch del paper:")
     print("obs:", b_obs.size())                    # [b_size*n_envs, h, w, 27] 
     print("logprobs:", b_logprobs.size())          # [b_size*n_envs*hw*7]
-    print("logprobs:", b_logprobs)
+    #print("logprobs:", b_logprobs)
     print("actions:", b_actions.size())            # [b_size*n_envs, hw*7]     [240, 448]
     print("advantages:", b_advantages.size())      # [b_size*envs]
     print("returns:", b_returns.size())            # [b_size*envs]
     print("action_masks:", b_action_masks.shape)   # [b_size*n_envs, hw*78]    [240, 4992]
 
     print("----------\n\n")"""
+    
     # Actualizar red si se cumple con los pasos
     # Obtener minibatches
-    # Aqui si necesitamos el grafico de autograd, por lo que debemos usar todo en tensores!
-    inds = np.arange(batch_size)
+    inds = []
+    count = 0
+    for i in range(0, args.envs*args.num_steps, num_steps):
+        inds += list(range(i, i + int(epoch_steps[count])))    
+        count += 1
+
+    batch_size = len(inds)
+    minibatch_size = batch_size // 4
     
-    # Si queremos que la epoch termine una vez acaben todos los ambientes por primera vez, descomentar abajo
-    #inds = np.arange(step + 1)         # CHANGE 
-    #batch_size = len(inds)             # CHANGE
-    #minibatch_size = batch_size // 4   # CHANGE
-
-
+    
     for e in range(update_epochs):
         random.shuffle(inds)
 
@@ -506,18 +537,12 @@ for epoch in range(num_epochs):
             end = start + minibatch_size
             minibatch_ind = inds[start:end]   # Indices correspondientes a los estados del minibatch
             mb_advantages = b_advantages[minibatch_ind]
-            #print("mb_advantages shape:", mb_advantages.size())
 
-            #print("b_obs minibatch shape:", b_actions[minibatch_ind].shape)
-            #print("b_action_masks minibatch shape:", b_action_masks[minibatch_ind].shape)
-            
             _, newlogprobs, newentropy, _ = agent.get_action(b_obs[minibatch_ind], b_actions[minibatch_ind], b_action_masks[minibatch_ind], envs)
 
             ratio = (newlogprobs - b_logprobs[minibatch_ind]).exp()
-            #print("newlogprobs:", newlogprobs.exp())
-            #print("b_logprobs minibatch:", b_logprobs[minibatch_ind].exp())
-            #print("Ratio:", ratio)
             
+
             # Loss
             loss_1 = -mb_advantages * ratio
             loss_2 = -mb_advantages * torch.clamp(ratio, 1 - epsilon, 1 + epsilon)   # Clip el ratio
@@ -570,6 +595,19 @@ for i in range(num_envs):
     plot_legend.append("env " + str(i))
 
 
+# Grafico epochs vs steps
+plt.plot(list(range(num_epochs)), steps_per_epoch)
+plt.xlabel("Epochs")
+plt.ylabel("steps")
+plt.title("Epochs vs Mean_Steps      (" + str(num_epochs) + " epochs)")
+plt.legend(plot_legend)
+plt.savefig("mean_steps_per_env_" + str(num_epochs) + "_epochs.png")
+plt.show()
+plt.close()
+
+
+
+# Grafico de rewards por episodio por env
 plt.plot(list(range(num_epochs)), rewards_per_episode)
 plt.xlabel("Epochs")
 plt.ylabel("Rewards")
@@ -590,13 +628,13 @@ plt.close()
 
 
 
-# Grafico Epochs vs Max Time Alive
+"""# Grafico Epochs vs Max Time Alive
 plt.plot(list(range(len(time_alive))), time_alive)
 plt.xlabel("Epochs")
 plt.ylabel("Steps")
 plt.title("Epochs vs Steps    (" + str(num_epochs) + " epochs)")
 plt.savefig("epochs_vs_steps_epochs_" + str(num_epochs) + ".png")
 plt.show()
-plt.close()
+plt.close()"""
 
 envs.close()
